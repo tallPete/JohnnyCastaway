@@ -82,9 +82,9 @@ struct EnginePublicAPITests {
         #expect(true)
     }
 
-    @Test("Version marker updated to phase2")
+    @Test("Version marker updated to phase3")
     func versionMarker() {
-        #expect(JohnnyEngine.version == "0.0.0-phase2")
+        #expect(JohnnyEngine.version == "0.0.0-phase3")
     }
 }
 
@@ -93,8 +93,8 @@ struct EnginePublicAPITests {
 @Suite("JohnnyEngine module")
 struct JohnnyEngineModuleTests {
 
-    @Test("Module version is phase2")
+    @Test("Module version is phase3")
     func version() {
-        #expect(JohnnyEngine.version == "0.0.0-phase2")
+        #expect(JohnnyEngine.version == "0.0.0-phase3")
     }
 }

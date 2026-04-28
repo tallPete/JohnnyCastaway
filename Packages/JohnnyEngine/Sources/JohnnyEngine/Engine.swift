@@ -17,7 +17,7 @@ import JohnnyResources
 
 /// Version of this module.
 public enum JohnnyEngine {
-    public static let version = "0.0.0-phase2"
+    public static let version = "0.0.0-phase3"
 }
 
 /// The main engine object. Not thread-safe; call from one thread only.

@@ -11,6 +11,6 @@ struct JohnnyMetalRendererSkeletonTests {
 
     @Test("JohnnyEngine dependency resolves")
     func engineDependency() {
-        #expect(JohnnyMetalRenderer.engineVersion == "0.0.0-phase2")
+        #expect(JohnnyMetalRenderer.engineVersion == "0.0.0-phase3")
     }
 }

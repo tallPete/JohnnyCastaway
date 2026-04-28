@@ -75,8 +75,15 @@ final class ADSScheduler {
     /// Running threads.
     var threads:    [TTMThread] = (0 ..< MAX_TTM_THREADS).map { _ in TTMThread() }
 
-    /// Background thread (island animation, Phase 3). For Phase 2 not used.
+    /// Background thread (island wave animation). isRunning==3 means active.
     var backgroundThread = TTMThread()
+
+    /// Called each time the background thread timer fires.
+    /// Phase 3 sets this to `islandRenderer.animate(state:)`.
+    var onBackgroundTick: (() -> Void)?
+
+    /// Optional holiday decoration layer; composited on top of all TTM layers.
+    var holidayLayer: Framebuffer? = nil
 
     /// Number of currently running foreground threads.
     var numThreads: Int = 0
@@ -113,10 +120,14 @@ final class ADSScheduler {
     var isFinished: Bool { numThreads == 0 }
 
     /// Composed output for the current frame.
+    /// Order: background → active TTM layers → holiday decoration.
     var composedFramebuffer: Framebuffer {
         var dest = Framebuffer()
         let activeLayers = threads.filter { $0.isRunning == 1 }.map { $0.layer }
         graphics.composite(threadLayers: activeLayers, into: &dest)
+        if let holiday = holidayLayer {
+            dest.composite(layer: holiday)
+        }
         return dest
     }
 
@@ -502,10 +513,11 @@ final class ADSScheduler {
         // Reset state
         for slot in ttmSlots { slot.reset() }
         for t in threads     { t.free() }
-        numThreads    = 0
-        stopRequested = false
-        graphics.dx   = 0
-        graphics.dy   = 0
+        numThreads        = 0
+        stopRequested     = false
+        graphics.dx       = 0
+        graphics.dy       = 0
+        // Background/holiday are managed externally by StoryRunner; don't reset here.
 
         // Load each referenced TTM into its slot
         for ref in script.referencedResources {
@@ -534,7 +546,13 @@ final class ADSScheduler {
     /// Returns the number of ticks to sleep (mini).
     @discardableResult
     func tick() -> Int {
-        // (a) Advance threads
+        // (a) Advance background thread (island wave animation, ads.c:685–689)
+        if backgroundThread.isRunning != 0 && backgroundThread.timer == 0 {
+            backgroundThread.timer = backgroundThread.delay
+            onBackgroundTick?()
+        }
+
+        // (b) Advance foreground threads
         for t in threads where t.isRunning == 1 && t.timer == 0 {
             t.timer = t.delay
             TTMInterpreter.play(
@@ -543,14 +561,20 @@ final class ADSScheduler {
             )
         }
 
-        // (b) Compute mini
+        // (c) Compute mini across background + foreground timers (ads.c:732–747)
         var mini = 300
+        if backgroundThread.isRunning != 0 {
+            mini = min(mini, backgroundThread.timer)
+        }
         for t in threads where t.isRunning == 1 {
             if t.timer < mini { mini = t.timer }
         }
         if mini == 300 { mini = 0 }
 
-        // (c) Decrement timers
+        // (d) Decrement timers
+        if backgroundThread.isRunning != 0 {
+            backgroundThread.timer -= mini
+        }
         for t in threads where t.isRunning == 1 {
             t.timer -= mini
         }
