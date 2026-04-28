@@ -20,6 +20,27 @@ public enum JohnnyEngine {
     public static let version = "0.0.0-phase3"
 }
 
+// ---------------------------------------------------------------
+// MARK: - TTMThreadSnapshot
+// ---------------------------------------------------------------
+
+/// A point-in-time snapshot of one running TTM thread, for display
+/// in the debug overlay's thread scrubber.
+public struct TTMThreadSnapshot: Sendable {
+    /// Name of the TTM resource (e.g. "JOHNSC7.TTM").
+    public let slotName: String
+    /// ADS tag this thread was launched with.
+    public let tag: UInt16
+    /// Current instruction-pointer byte offset into the TTM bytecode.
+    public let ip: Int
+    /// Opcode at the current IP (nil if the thread is at end-of-bytecode).
+    public let currentOpcode: UInt16?
+    /// Ticks remaining on this thread's per-UPDATE timer.
+    public let timer: Int
+    /// Ticks between UPDATE calls (SET_DELAY / TIMER value).
+    public let delay: Int
+}
+
 /// The main engine object. Not thread-safe; call from one thread only.
 public final class Engine {
 
@@ -108,5 +129,23 @@ public final class Engine {
     /// Set of TTM opcodes encountered since the last `beginADS` call.
     public var coveredTTMOpcodes: Set<UInt16> {
         TTMInterpreter.coveredOpcodes
+    }
+
+    /// Number of TTM threads currently running in the active scene.
+    public var activeThreadCount: Int { scheduler.activeThreadCount }
+
+    /// Snapshot of each running thread's state (slot name, tag, IP, opcode,
+    /// timer). Updated live on every `tick()` call.
+    public var threadSnapshots: [TTMThreadSnapshot] { scheduler.threadSnapshots }
+
+    // ---------------------------------------------------------------
+    // MARK: Fidelity mode
+    // ---------------------------------------------------------------
+
+    /// Switch between Go-port-corrected (.fixed) and jc_reborn-canonical
+    /// (.raw) behaviour. Takes effect immediately for IF_IS_RUNNING and
+    /// wave-counter changes; day/night takes effect at the next sequence.
+    public var fidelityMode: FidelityMode = .fixed {
+        didSet { scheduler.fidelityMode = fidelityMode }
     }
 }

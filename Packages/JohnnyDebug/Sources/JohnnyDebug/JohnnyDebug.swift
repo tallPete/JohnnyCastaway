@@ -1,24 +1,31 @@
 // JohnnyDebug
 //
-// SwiftUI overlay (frame stepper, scene picker, current scene/tick
-// readout, "force date" picker for holiday testing). Reused by the
-// JohnnyDebugApp host and (gated by a settings flag) by the .saver
-// itself for in-the-wild diagnosis.
+// SwiftUI overlay + observable state model for the JohnnyDebugApp and
+// (gated by a settings flag) the .saver itself.
 //
-// Phase 0: skeleton only. Phase 5 brings the SwiftUI overlay, scene
-// picker, frame stepper, and force-date controls.
+// Public API:
+//   EngineDebugState   — @Observable @MainActor state: pause/step, scene
+//                        picker, fidelity mode, force-date, overlay toggle,
+//                        sound readout, thread snapshots. Provides tick()
+//                        for JohnnyMetalView.frameProvider.
+//   DebugOverlayView   — SwiftUI View to embed over the Metal view.
+//
+// Usage (debug app):
+//   let state = EngineDebugState()
+//   state.configure(engine: engine, storyRunner: runner)
+//   metalView.frameProvider = { state.tick() }
+//   // Embed DebugOverlayView(state: state) over the Metal view.
 
 import Foundation
 import JohnnyEngine
 import JohnnyMetalRenderer
 
-/// Module marker. Replaced in Phase 5 by the real debug overlay API.
+/// Module marker.
 public enum JohnnyDebug {
     /// Semantic version of the debug module.
-    public static let version = "0.0.0-phase0"
+    public static let version = "0.0.0-phase5"
 
-    /// Verifies dependencies on JohnnyEngine and JohnnyMetalRenderer
-    /// resolve correctly.
+    /// Versions of the JohnnyEngine and JohnnyMetalRenderer dependencies.
     public static var dependencyVersions: (engine: String, renderer: String) {
         (JohnnyEngine.version, JohnnyMetalRenderer.version)
     }

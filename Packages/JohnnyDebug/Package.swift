@@ -20,7 +20,12 @@ let package = Package(
     targets: [
         .target(
             name: "JohnnyDebug",
-            dependencies: ["JohnnyEngine", "JohnnyMetalRenderer"]
+            dependencies: ["JohnnyEngine", "JohnnyMetalRenderer"],
+            linkerSettings: [
+                // SwiftUI and AppKit are auto-linked, but QuartzCore needs
+                // explicit linking for CAMetalLayer usage in the overlay host.
+                .linkedFramework("QuartzCore"),
+            ]
         ),
         .testTarget(
             name: "JohnnyDebugTests",

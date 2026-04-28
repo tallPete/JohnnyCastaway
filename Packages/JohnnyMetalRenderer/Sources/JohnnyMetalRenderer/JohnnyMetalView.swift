@@ -43,10 +43,22 @@ public final class JohnnyMetalView: NSView {
     // MARK: Public
     // ---------------------------------------------------------------
 
-    /// The engine to render. Set before the view is added to a window.
-    /// Changing mid-display is safe: the next display-link tick picks up
-    /// the new reference.
+    /// The engine to render in simple-ADS mode.
+    /// Takes effect only when `frameProvider` is nil.
     public var engine: Engine?
+
+    /// An optional higher-level frame provider that replaces the simple
+    /// `engine` path. When set, the view calls this closure each display
+    /// tick (subject to the same `lastMini` pacing as the engine path)
+    /// and expects either:
+    ///   - `(Framebuffer, EnginePalette, Int)` — a new frame to upload
+    ///     (Int = mini ticks, sets the pacing interval); or
+    ///   - `nil` — no new frame; the last-rendered frame is repeated.
+    ///
+    /// Set by the debug app to delegate ticking to `EngineDebugState`
+    /// (which handles pause/step/scene-override logic). The .saver target
+    /// (Phase 6) will use `EngineRenderer` directly instead of this view.
+    public var frameProvider: (@MainActor () -> (Framebuffer, EnginePalette, Int)?)?
 
     // ---------------------------------------------------------------
     // MARK: Private — Metal state
@@ -159,12 +171,20 @@ public final class JohnnyMetalView: NSView {
     @objc private func renderFrame() {
         guard let renderer else { return }
 
-        // Tick the engine when enough time has elapsed since the last tick.
-        // `lastMini` is the number of engine ticks (≈ milliseconds) to wait.
-        if let engine {
-            let now       = CACurrentMediaTime()
-            let elapsedMS = (now - lastTickTime) * 1000.0
-            if elapsedMS >= Double(lastMini) {
+        let now       = CACurrentMediaTime()
+        let elapsedMS = (now - lastTickTime) * 1000.0
+
+        if elapsedMS >= Double(lastMini) {
+            if let provider = frameProvider {
+                // Higher-level provider (e.g. EngineDebugState): returns a new
+                // frame + pacing hint, or nil when paused/no change.
+                if let (fb, pal, mini) = provider() {
+                    lastMini     = mini
+                    lastTickTime = now
+                    renderer.update(framebuffer: fb, palette: pal)
+                }
+            } else if let engine {
+                // Simple Engine path: always tick when the pacing interval elapses.
                 lastMini     = engine.tick()
                 lastTickTime = now
                 renderer.update(framebuffer: engine.composedFramebuffer,

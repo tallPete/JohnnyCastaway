@@ -13,4 +13,7 @@
    <FileRef
       location = "group:Packages/JohnnyDebug">
    </FileRef>
+   <FileRef
+      location = "group:Apps/JohnnyDebugApp">
+   </FileRef>
 </Workspace>

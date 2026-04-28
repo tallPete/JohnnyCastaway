@@ -65,6 +65,9 @@ final class ADSScheduler {
     let graphics: GraphicsState
     let sound:    SoundSink
 
+    /// Controls IF_IS_RUNNING inversion and other jc_reborn-vs-Go differences.
+    var fidelityMode: FidelityMode = .fixed
+
     /// The raw ADS bytecode being interpreted.
     private var adsData:     Data   = Data()
     private var adsDataSize: Int    = 0
@@ -118,6 +121,27 @@ final class ADSScheduler {
     // ---------------------------------------------------------------
 
     var isFinished: Bool { numThreads == 0 }
+
+    /// Number of TTM threads currently in the running state (isRunning == 1).
+    var activeThreadCount: Int { threads.filter { $0.isRunning == 1 }.count }
+
+    /// Snapshot of each running thread's current state for the debug overlay.
+    var threadSnapshots: [TTMThreadSnapshot] {
+        threads.filter { $0.isRunning == 1 }.map { t in
+            let opcode: UInt16? = {
+                guard let slot = t.ttmSlot, t.ip + 1 < slot.bytecode.count else { return nil }
+                return readUInt16LE(slot.bytecode, at: t.ip)
+            }()
+            return TTMThreadSnapshot(
+                slotName: t.ttmSlot?.resourceName ?? "—",
+                tag:          t.sceneTag,
+                ip:           t.ip,
+                currentOpcode: opcode,
+                timer:        t.timer,
+                delay:        t.delay
+            )
+        }
+    }
 
     /// Composed output for the current frame.
     /// Order: background → active TTM layers → holiday decoration.
@@ -380,12 +404,17 @@ final class ADSScheduler {
                 offset += 4
                 if isSceneRunning(slot: slot, tag: tag) { inSkipBlock = true }
 
-            case 0x1370:  // IF_IS_RUNNING (corrected: skip if NOT running)
+            case 0x1370:  // IF_IS_RUNNING
                 let slot = readUInt16LE(adsData, at: offset)
                 let tag  = readUInt16LE(adsData, at: offset + 2)
                 offset += 4
-                // Fix per Go port (ads.go:417): inSkipBlock = !isSceneRunning
-                inSkipBlock = !isSceneRunning(slot: slot, tag: tag)
+                // .fixed: Go-port correction (ads.go:417) — skip when NOT running.
+                // .raw:   jc_reborn inversion bug — skip when IS running.
+                if fidelityMode == .fixed {
+                    inSkipBlock = !isSceneRunning(slot: slot, tag: tag)
+                } else {
+                    inSkipBlock = isSceneRunning(slot: slot, tag: tag)
+                }
 
             case 0x1420:  // AND — no action needed
                 break

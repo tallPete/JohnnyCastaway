@@ -34,10 +34,18 @@ public final class IslandRenderer {
     private let graphics: GraphicsState
 
     // ---------------------------------------------------------------
+    // MARK: Fidelity mode
+    // ---------------------------------------------------------------
+
+    /// Controls wave-counter modulo (and any future island-layer divergences).
+    /// Set by StoryRunner when the debug overlay changes the fidelity toggle.
+    public var fidelityMode: FidelityMode = .fixed
+
+    // ---------------------------------------------------------------
     // MARK: Wave animation counters (static in C; instance vars here)
     // ---------------------------------------------------------------
 
-    private var counter1: Int = 0   // wave frame index (0–1, Go fix %= 2)
+    private var counter1: Int = 0   // wave frame index (0–1 fixed, 0–2 raw)
     private var counter2: Int = 0   // which shore position to update
 
     // ---------------------------------------------------------------
@@ -198,7 +206,7 @@ public final class IslandRenderer {
         }
 
         if counter2 == 0 {
-            counter1 = (counter1 + 1) % 2  // Go fix: %= 2 (not 3)
+            counter1 = (counter1 + 1) % (fidelityMode == .fixed ? 2 : 3)
         }
 
         graphics.background = bg

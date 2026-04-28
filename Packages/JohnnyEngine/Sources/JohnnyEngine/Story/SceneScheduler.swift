@@ -56,11 +56,17 @@ public struct SceneScheduler {
     // ---------------------------------------------------------------
 
     /// Determine night flag from date/time components.
-    /// Go fix: `hour < 6 || hour >= 18`
-    public static func isNight(date: Date) -> Bool {
+    /// .fixed (Go fix): `hour < 6 || hour >= 18`
+    /// .raw (jc_reborn): `(hour % 8) ∈ {0, 7}` — broken 3-window split
+    public static func isNight(date: Date, fidelityMode: FidelityMode = .fixed) -> Bool {
         let comps = Calendar.current.dateComponents([.hour], from: date)
         let hour  = comps.hour ?? 12
-        return hour < 6 || hour >= 18
+        if fidelityMode == .fixed {
+            return hour < 6 || hour >= 18
+        } else {
+            let h = hour % 8
+            return h == 0 || h == 7
+        }
     }
 
     /// Determine holiday value (0=none; 1–4) from date.
