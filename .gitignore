@@ -1,0 +1,44 @@
+# --- Sierra/Dynamix IP — never commit ---------------------------------
+# RESOURCE.MAP, RESOURCE.001, sound*.wav are obtained per-user
+# (bring-your-own model). They live here for local development only.
+Resources/
+
+# --- Reference implementations ----------------------------------------
+# These are public clones of jc_reborn / Johnny-Castaway-2026-Public /
+# JCOS held locally for reference. Track via git submodules later if
+# desired; not committed here.
+Clones/
+
+# --- macOS ------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# --- Swift / SwiftPM --------------------------------------------------
+.build/
+.swiftpm/
+Packages/*/Package.resolved
+Package.resolved
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# --- Xcode ------------------------------------------------------------
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# --- Claude Code session data -----------------------------------------
+.claude/
+
+# --- Editor / OS scratch ----------------------------------------------
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
