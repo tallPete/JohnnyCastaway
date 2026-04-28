@@ -13,6 +13,6 @@ struct JohnnyDebugSkeletonTests {
     func dependenciesResolve() {
         let versions = JohnnyDebug.dependencyVersions
         #expect(versions.engine == "0.0.0-phase3")
-        #expect(versions.renderer == "0.0.0-phase0")
+        #expect(versions.renderer == "0.0.0-phase4")
     }
 }

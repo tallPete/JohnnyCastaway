@@ -29,6 +29,19 @@ public struct EnginePalette: Sendable {
     /// 16 engine colours. Index 0 is colour 0, index 15 is colour 15.
     public let colors: [RGBA]   // exactly 16 entries
 
+    /// Direct initialiser for programmatic palette construction and testing.
+    /// `colors` must contain exactly 16 entries.
+    public init(colors: [RGBA]) {
+        precondition(colors.count == 16, "EnginePalette requires exactly 16 colors")
+        self.colors = colors
+    }
+
+    /// Convenience: all-black 16-entry palette (useful as a neutral default
+    /// when no resource file is available, e.g. in unit tests).
+    public static var black: EnginePalette {
+        EnginePalette(colors: Array(repeating: RGBA(r: 0, g: 0, b: 0), count: 16))
+    }
+
     /// Build from a JohnnyResources.Palette, expanding VGA 6-bit values.
     public init(from palette: Palette) {
         var out = [RGBA]()

@@ -19,11 +19,21 @@ let package = Package(
     targets: [
         .target(
             name: "JohnnyMetalRenderer",
-            dependencies: ["JohnnyEngine"]
+            dependencies: ["JohnnyEngine"],
+            linkerSettings: [
+                // Explicit linking ensures both Xcode and swift-test builds
+                // find these frameworks without relying on auto-link.
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+            ]
         ),
         .testTarget(
             name: "JohnnyMetalRendererTests",
-            dependencies: ["JohnnyMetalRenderer"]
+            dependencies: ["JohnnyMetalRenderer"],
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]

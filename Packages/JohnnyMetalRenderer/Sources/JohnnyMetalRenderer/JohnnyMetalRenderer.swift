@@ -1,22 +1,32 @@
 // JohnnyMetalRenderer
 //
-// Uploads JohnnyEngine's 640×480 indexed framebuffer as a Metal
-// texture and renders to a CAMetalLayer with nearest-neighbour
-// integer scaling. Fragment shader samples a 16-entry RGBA palette
-// LUT at the indexed value to produce final pixel colour.
+// Uploads JohnnyEngine's 640×480 indexed framebuffer as an R8Uint Metal
+// texture and renders to a CAMetalLayer with nearest-neighbour integer
+// scaling. A 16×1 RGBA8Unorm palette LUT texture is sampled in the
+// fragment shader to expand palette indices to RGB.
 //
-// Phase 0: skeleton only. Phase 4 brings the Metal pipeline, palette
-// LUT shader, integer-scale letterboxing, and CAMetalLayer host.
+// Public API:
+//   EngineRenderer    — Core renderer: init(device:), update(framebuffer:palette:),
+//                       render(to:drawableSize:). No AppKit dependency.
+//   JohnnyMetalView   — NSView subclass (AppKit) with CAMetalLayer backing and
+//                       CADisplayLink tick loop. Set .engine to drive it.
+//   RendererError     — Thrown by EngineRenderer.init on GPU/shader failure.
+//
+// Shaders:
+//   Embedded as a Swift string in ShaderSource.swift; compiled at init time
+//   via MTLDevice.makeLibrary(source:options:). No .metallib bundle resource
+//   needed for the SwiftPM package. The .saver target (Phase 6) may opt into
+//   a pre-compiled metallib via Bundle.module for faster launch.
 
 import Foundation
 import JohnnyEngine
 
-/// Module marker. Replaced in Phase 4 by the real renderer API.
+/// Module marker.
 public enum JohnnyMetalRenderer {
     /// Semantic version of the renderer module.
-    public static let version = "0.0.0-phase0"
+    public static let version = "0.0.0-phase4"
 
-    /// Verifies the dependency on JohnnyEngine resolves correctly.
+    /// Version of the JohnnyEngine dependency.
     public static var engineVersion: String {
         JohnnyEngine.version
     }
