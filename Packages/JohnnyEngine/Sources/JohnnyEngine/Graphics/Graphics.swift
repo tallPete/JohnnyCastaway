@@ -37,6 +37,14 @@ public final class GraphicsState: @unchecked Sendable {
     /// Y offset added to every draw call.
     public var dy: Int = 0
 
+    /// True iff the current background is the regular ocean-island
+    /// background (set up by IslandRenderer.setup), as opposed to a
+    /// scene-specific screen loaded via the LOAD_SCREEN TTM opcode (e.g.
+    /// ISLAND2.SCR for a fishing close-up). The wave-animation thread only
+    /// makes sense over the island background — running it over a scene's
+    /// own background draws wave sprites at meaningless positions.
+    public var isIslandBackground: Bool = false
+
     // ---------------------------------------------------------------
     // MARK: Saved-zones layer — translation of `grSavedZonesLayer`
     // ---------------------------------------------------------------
@@ -54,6 +62,17 @@ public final class GraphicsState: @unchecked Sendable {
     /// The full-screen indexed background, loaded by LOAD_SCREEN.
     /// nil == black / transparent background.
     var background: Framebuffer? = nil
+
+    // ---------------------------------------------------------------
+    // MARK: Transparent colour key
+    // ---------------------------------------------------------------
+
+    /// Palette index treated as transparent in all sprite blits.
+    /// jc_reborn uses SDL_SetColorKey with VGA palette index 5 (r=42,g=0,b=42
+    /// in 6-bit → R=0xa8,G=0,B=0xa8 in 8-bit — magenta). Every sprite sheet
+    /// has its background filled with this colour, so we must skip index 5 just
+    /// as the C reference skips the SDL color key.
+    public var transparentIndex: UInt8 = 5
 
     // ---------------------------------------------------------------
     // MARK: Draw primitives
@@ -220,7 +239,7 @@ public final class GraphicsState: @unchecked Sendable {
                 let dx2 = bx + col
                 guard dx2 >= 0 && dx2 < Framebuffer.width else { continue }
                 let px = spritePixels[row * w + col]
-                if px != 0xFF {
+                if px != 0xFF && px != transparentIndex {
                     layer.pixels[dy2 * Framebuffer.width + dx2] = px
                 }
             }
@@ -249,7 +268,7 @@ public final class GraphicsState: @unchecked Sendable {
                 let dx2 = bx - col    // mirror x
                 guard dx2 >= 0 && dx2 < Framebuffer.width else { continue }
                 let px = spritePixels[row * w + col]
-                if px != 0xFF {
+                if px != 0xFF && px != transparentIndex {
                     layer.pixels[dy2 * Framebuffer.width + dx2] = px
                 }
             }
@@ -267,10 +286,15 @@ public final class GraphicsState: @unchecked Sendable {
     }
 
     /// Clear a layer's content to transparent, restoring the clip rect.
-    /// Translates grClearScreen() in graphics.c:494–502.
+    /// Translates grClearScreen() in graphics.c:494–502: it temporarily
+    /// disables the clip rect (SDL_SetClipRect NULL), fills the WHOLE
+    /// surface, then restores the clip. Clearing only within the clip leaves
+    /// stale pixels outside it — which is what was producing "multiple
+    /// Johnnys" (old animation frames staying behind when the script set a
+    /// tight clip zone around the new sprite position).
     func clearScreen(layer: inout Framebuffer) {
         let saved = layer.clipRect
-        layer.clearClipped(to: 0xFF)  // clear only the clipped area
+        layer.clearAll(to: 0xFF)
         layer.clipRect = saved
     }
 
@@ -343,23 +367,33 @@ public final class GraphicsState: @unchecked Sendable {
     // ---------------------------------------------------------------
 
     /// Load a Screen resource as the full background.
-    /// Translates grLoadScreen() in graphics.c:505–539.
-    /// The Screen is already in 8bpp indexed format (Phase 1 unpacked).
+    /// Translates grLoadScreen() in graphics.c:505–539. jc_reborn only
+    /// allocates `width × height` for the screen surface; rows beyond the
+    /// screen height stay at the SDL window's existing (black) pixels. We
+    /// emulate that by filling the framebuffer with the 0xFF sentinel so the
+    /// shader renders unfilled regions as black, then copying the screen on
+    /// top. (Filling with palette index 0 was wrong: it's magenta in Johnny's
+    /// palette, producing a magenta band wherever the screen didn't reach.)
     func loadScreen(_ screen: Screen) {
-        var fb = Framebuffer(filledWith: 0)
+        var fb = Framebuffer(filledWith: 0xFF)
         let count = min(screen.pixels.count, fb.pixels.count)
         for i in 0 ..< count {
             fb.pixels[i] = screen.pixels[i]
         }
         background = fb
         savedZonesLayer = nil
+        // A bare loadScreen is, by default, NOT an island background.
+        // IslandRenderer.setup() will flip this back to true after it has
+        // composited the island/raft/clouds onto the loaded screen.
+        isIslandBackground = false
     }
 
-    /// Set an empty (zeroed) background.
+    /// Set an empty background (transparent sentinel; renders as black).
     /// Translates grInitEmptyBackground() in graphics.c:542–554.
     func initEmptyBackground() {
-        background = Framebuffer(filledWith: 0)
+        background = Framebuffer(filledWith: 0xFF)
         savedZonesLayer = nil
+        isIslandBackground = false
     }
 
     // ---------------------------------------------------------------
@@ -373,11 +407,15 @@ public final class GraphicsState: @unchecked Sendable {
         threadLayers: [Framebuffer],
         into dest: inout Framebuffer
     ) {
-        // 1. Background
+        // 1. Background — fall back to the 0xFF sentinel (renders as black
+        // via the shader). Filling with 0 was wrong: that's the magenta
+        // colour-key index in Johnny's palette, producing a magenta box
+        // around scenes played without an island background (e.g. the debug
+        // overlay's "Play" button).
         if let bg = background {
             dest = bg
         } else {
-            dest.clearAll(to: 0)
+            dest.clearAll(to: 0xFF)
         }
         // 2. Saved-zones layer
         if let sz = savedZonesLayer {

@@ -179,13 +179,16 @@ public final class JohnnyMetalView: NSView {
                 // Higher-level provider (e.g. EngineDebugState): returns a new
                 // frame + pacing hint, or nil when paused/no change.
                 if let (fb, pal, mini) = provider() {
-                    lastMini     = mini
+                    // jc_reborn events.c:108 — sleep duration in ms is mini*20
+                    // (1 mini-tick ≈ 20ms wall clock). Floor at 4ms so we never
+                    // spin at display Hz when mini=0 (idle/transition states).
+                    lastMini     = max(4, mini * 20)
                     lastTickTime = now
                     renderer.update(framebuffer: fb, palette: pal)
                 }
             } else if let engine {
                 // Simple Engine path: always tick when the pacing interval elapses.
-                lastMini     = engine.tick()
+                lastMini     = max(4, engine.tick() * 20)
                 lastTickTime = now
                 renderer.update(framebuffer: engine.composedFramebuffer,
                                 palette:    engine.palette)

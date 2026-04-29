@@ -145,9 +145,14 @@ final class ADSScheduler {
 
     /// Composed output for the current frame.
     /// Order: background → active TTM layers → holiday decoration.
+    /// Includes any non-zero isRunning (matches jc_reborn graphics.c:196).
+    /// State 2 (terminated awaiting cleanup) MUST be included: a thread that
+    /// hits PURGE often sits in state 2 for many ticks while its timer
+    /// counts down to 0; filtering by ==1 made Johnny's last-drawn frame
+    /// vanish for ~3.5s between scenes (the "Johnny disappears" symptom).
     var composedFramebuffer: Framebuffer {
         var dest = Framebuffer()
-        let activeLayers = threads.filter { $0.isRunning == 1 }.map { $0.layer }
+        let activeLayers = threads.filter { $0.isRunning != 0 }.map { $0.layer }
         graphics.composite(threadLayers: activeLayers, into: &dest)
         if let holiday = holidayLayer {
             dest.composite(layer: holiday)
@@ -303,6 +308,9 @@ final class ADSScheduler {
         }
 
         numThreads += 1
+        let threadIdx = threads.firstIndex(where: { $0 === freeThread }) ?? -1
+        let slotName = ttmSlots[Int(slot)].resourceName
+        print("[thread] spawn idx=\(threadIdx) slot=\(slot)(\(slotName)) tag=\(tag) sceneTimer=\(freeThread.sceneTimer) iter=\(freeThread.sceneIterations) ip=\(freeThread.ip) (numThreads=\(numThreads))")
     }
 
     // ---------------------------------------------------------------
@@ -544,8 +552,13 @@ final class ADSScheduler {
         for t in threads     { t.free() }
         numThreads        = 0
         stopRequested     = false
-        graphics.dx       = 0
-        graphics.dy       = 0
+        // Note: graphics.dx/dy are NOT reset here. jc_reborn's adsPlay() leaves
+        // them alone — the caller (story.c / Engine façade) is responsible for
+        // setting them to the island offset (or zero for non-island scenes)
+        // BEFORE calling beginADS. Resetting here clobbered the island offset
+        // StoryRunner had just set, which made every TTM scene render its
+        // sprites at (0,0) instead of on the island — i.e. Johnny was being
+        // drawn off-screen.
         // Background/holiday are managed externally by StoryRunner; don't reset here.
 
         // Load each referenced TTM into its slot
@@ -590,21 +603,28 @@ final class ADSScheduler {
             )
         }
 
-        // (c) Compute mini across background + foreground timers (ads.c:732–747)
+        // (c) Compute mini across background + foreground timers (ads.c:732–747).
+        // Iterate all non-zero isRunning states (including 2 = "terminated,
+        // awaiting cleanup"); restricting to ==1 left state-2 threads with
+        // their timers frozen, so the post-process cleanup never fired and
+        // scenes wedged forever (numThreads stayed > 0). Also include `delay`
+        // alongside `timer` to match jc_reborn ads.c:741–745.
         var mini = 300
         if backgroundThread.isRunning != 0 {
             mini = min(mini, backgroundThread.timer)
         }
-        for t in threads where t.isRunning == 1 {
+        for t in threads where t.isRunning != 0 {
+            if t.delay < mini { mini = t.delay }
             if t.timer < mini { mini = t.timer }
         }
         if mini == 300 { mini = 0 }
 
-        // (d) Decrement timers
+        // (d) Decrement timers — also for state-2 threads, otherwise their
+        // timer never reaches 0 and the cleanup branch below is never taken.
         if backgroundThread.isRunning != 0 {
             backgroundThread.timer -= mini
         }
-        for t in threads where t.isRunning == 1 {
+        for t in threads where t.isRunning != 0 {
             t.timer -= mini
         }
 
@@ -626,12 +646,23 @@ final class ADSScheduler {
 
             // Process done threads
             if t.isRunning == 2 {
+                let idx = threads.firstIndex(where: { $0 === t }) ?? -1
+                let slotName = t.ttmSlot?.resourceName ?? "?"
                 if t.sceneIterations > 0 {
-                    // Re-queue
+                    print("[thread] requeue idx=\(idx) slot=\(slotName) tag=\(t.sceneTag) iterRemaining=\(t.sceneIterations - 1)")
                     t.sceneIterations -= 1
                     t.isRunning = 1
                     t.ip = ttmSlots[Int(t.sceneSlot)].findTag(t.sceneTag) ?? 0
+                    // Clear the layer on each iteration. jc_reborn doesn't do
+                    // this, but our combined fix (state-2 layers visible)
+                    // means stale draws from the previous iteration would
+                    // remain composited until the next CLEAR_SCREEN inside
+                    // the iteration body. For loops where the script doesn't
+                    // call CLEAR_SCREEN at the top of each iteration, this
+                    // produces visible "stacked" sprite trails.
+                    t.layer = GraphicsState.newLayer()
                 } else {
+                    print("[thread] free idx=\(idx) slot=\(slotName) tag=\(t.sceneTag) (numThreads=\(numThreads - 1))")
                     let doneSlot = t.sceneSlot
                     let doneTag  = t.sceneTag
                     adsStopScene(t)

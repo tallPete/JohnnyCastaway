@@ -168,6 +168,14 @@ public final class IslandRenderer {
         for _ in 0 ..< 4 {
             animate(state: state)
         }
+
+        // Mark this as an island background so the wave-animation thread
+        // is allowed to overlay wave sprites on it. A subsequent TTM
+        // LOAD_SCREEN within a scene will flip this back to false (via
+        // graphics.loadScreen), which suppresses the wave overlay so we
+        // don't draw wave splashes at meaningless positions over a
+        // close-up scene background like ISLAND2.SCR.
+        graphics.isIslandBackground = true
     }
 
     // ---------------------------------------------------------------
@@ -180,8 +188,29 @@ public final class IslandRenderer {
     ///
     /// Go fix: `counter1 %= 2` (jc_reborn uses `%=3`).
     public func animate(state: IslandState) {
+        // Skip wave overlay when the current background isn't the regular
+        // ocean island (e.g. a scene's TTM ran LOAD_SCREEN ISLAND2.SCR).
+        // Wave sprite positions are designed for the ocean-island layout;
+        // drawing them over a close-up scene background produces stray
+        // wave splashes at the wrong positions.
+        guard graphics.isIslandBackground else { return }
         guard let backgrndBmp = backgroundSlot.bitmaps[0],
               var bg = graphics.background else { return }
+
+        // Save/restore the global dx/dy. Without this, the wave thread's
+        // tick clobbers the scene's offset that StoryRunner just set in
+        // transitionToNextScene, so the next TTM tick draws sprites at the
+        // wave-thread offset instead of the scene's own offset. Result:
+        // sprites alternate between two positions every frame, producing
+        // "multiple Johnnys" trails as the (uncleared) old layer state
+        // accumulates. (Scenes that LOAD_SCREEN their own background are
+        // especially affected because their dx is intentionally non-island.)
+        let savedDx = graphics.dx
+        let savedDy = graphics.dy
+        defer {
+            graphics.dx = savedDx
+            graphics.dy = savedDy
+        }
 
         graphics.dx = state.xPos
         graphics.dy = state.yPos

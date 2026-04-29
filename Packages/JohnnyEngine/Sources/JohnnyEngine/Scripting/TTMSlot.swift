@@ -99,13 +99,26 @@ final class TTMSlot {
             } else {
                 let numArgs = Int(opcode & 0x000F)
                 if numArgs == 0x0F {
-                    // string arg: advance past null-terminated string (pair-aligned)
-                    while offset + 1 < data.count &&
-                          !(data[offset] == 0 && data[offset + 1] == 0) {
+                    // String arg — must use the SAME byte-walking algorithm
+                    // as the play parser (TTMInterpreter: while data[offset]
+                    // != 0; then skip null; then pad to even).
+                    //
+                    // The previous "look for double null" approach was wrong:
+                    // odd-character-count strings (like "NIGHT.SCR" = 9 chars
+                    // + 1 null = 10 bytes, no padding) have NO double-null
+                    // terminator at the end. The scanner would then walk
+                    // past the string into the next opcode's bytes, losing
+                    // sync, miscounting all subsequent tag offsets, and
+                    // making findTag(N) return wrong byte positions for any
+                    // tag past a string opcode. The visible symptom: a
+                    // concurrent thread spawned at tag 80 would actually
+                    // run unrelated bytecode (often re-drawing Johnny
+                    // instead of the secondary element like fire/octopus).
+                    while offset < data.count && data[offset] != 0 {
                         offset += 1
                     }
-                    offset += 2 // skip the double-null terminator
-                    if offset % 2 != 0 { offset += 1 } // align to even
+                    if offset < data.count { offset += 1 } // skip the null
+                    if offset % 2 != 0 { offset += 1 }     // pad to even
                 } else {
                     offset += numArgs * 2
                 }

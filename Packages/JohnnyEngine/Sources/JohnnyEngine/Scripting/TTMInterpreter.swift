@@ -50,6 +50,7 @@ enum TTMInterpreter {
         while continueLoop {
             guard offset + 1 < data.count else {
                 // Ran off the end of bytecode → mark done
+                print("[ttm] thread done (end of bytecode) slot=\(slot.resourceName) tag=\(thread.sceneTag) at_ip=\(offset)")
                 thread.isRunning = 2
                 continueLoop = false
                 break
@@ -100,6 +101,7 @@ enum TTMInterpreter {
                     thread.nextGotoOffset =
                         slot.findPreviousTagOffset(before: offset)
                 } else {
+                    print("[ttm] thread done (PURGE, no sceneTimer) slot=\(slot.resourceName) tag=\(thread.sceneTag) at_ip=\(offset)")
                     thread.isRunning = 2
                 }
 
@@ -219,8 +221,21 @@ enum TTMInterpreter {
                 )
 
             case 0xA504:   // DRAW_SPRITE (args: x, y, spriteNo, imageNo)
-                let slot2 = thread.selectedBmpSlot
-                if let bmp = thread.ttmSlot?.bitmaps[slot2] {
+                // BUG FIX: jc_reborn graphics.c DRAW_SPRITE indexes
+                // ttmSlot->sprites[imageNo][spriteNo] — imageNo = args[3]
+                // selects WHICH BMP SLOT to draw from. Our previous code
+                // used thread.selectedBmpSlot (which is for LOAD_IMAGE to
+                // choose where to LOAD INTO), causing DRAW_SPRITE to ignore
+                // the bytecode-supplied bitmap selection. Symptoms:
+                // "Johnny's torso on the end of the fishing line" (script
+                // wanted to draw fish from slot 1 but we drew Johnny from
+                // selectedBmpSlot 0); "Lilliputians invisible, multiple
+                // Johnnys instead" (each thread's DRAW_SPRITE was supposed
+                // to use a different imageNo for its sprite sheet).
+                // imageNo (args[3]) selects the BMP slot to draw from
+                let bmpSlot = Int(args[3])
+                if bmpSlot >= 0 && bmpSlot < MAX_BMP_SLOTS,
+                   let bmp = thread.ttmSlot?.bitmaps[bmpSlot] {
                     graphics.drawSprite(
                         on: &thread.layer,
                         bitmap: bmp,
@@ -231,9 +246,10 @@ enum TTMInterpreter {
                     )
                 }
 
-            case 0xA524:   // DRAW_SPRITE_FLIP
-                let slot2 = thread.selectedBmpSlot
-                if let bmp = thread.ttmSlot?.bitmaps[slot2] {
+            case 0xA524:   // DRAW_SPRITE_FLIP — same imageNo semantics
+                let bmpSlot = Int(args[3])
+                if bmpSlot >= 0 && bmpSlot < MAX_BMP_SLOTS,
+                   let bmp = thread.ttmSlot?.bitmaps[bmpSlot] {
                     graphics.drawSpriteFlip(
                         on: &thread.layer,
                         bitmap: bmp,
@@ -255,7 +271,17 @@ enum TTMInterpreter {
 
             case 0xF01F:   // LOAD_SCREEN
                 if let scr = try? cache.screen(named: strArg) {
+                    print("[ttm] LOAD_SCREEN \(strArg) (slot=\(thread.ttmSlot?.resourceName ?? "?"))")
                     graphics.loadScreen(scr)
+                    // A scene that loads its own background (e.g.
+                    // ISLAND2.SCR for a fishing close-up) is no longer
+                    // working in island-offset coordinates — its sprites
+                    // are positioned relative to its own screen, not the
+                    // regular ocean island. Reset dx/dy so subsequent
+                    // sprite draws aren't shifted by the (now meaningless)
+                    // island varPos offset.
+                    graphics.dx = 0
+                    graphics.dy = 0
                 }
 
             case 0xF02F:   // LOAD_IMAGE

@@ -80,6 +80,7 @@ public final class StoryRunner {
     private var prevHdg:  Int = -1
 
     private var state: StoryState = .idle
+    private var playingTicks: Int = 0
 
     // ---------------------------------------------------------------
     // MARK: Exposed palette
@@ -107,6 +108,7 @@ public final class StoryRunner {
         // Load first palette
         let pal = try rcache.firstPalette()
         self.palette = EnginePalette(from: pal)
+        graphics.transparentIndex = self.palette.transparentIndex
     }
 
     // ---------------------------------------------------------------
@@ -137,6 +139,23 @@ public final class StoryRunner {
 
     /// Composed 640×480 indexed framebuffer for the current frame.
     public var composedFramebuffer: Framebuffer { scheduler.composedFramebuffer }
+
+    /// Number of actively-running TTM threads (for the debug overlay).
+    public var activeThreadCount: Int { scheduler.activeThreadCount }
+
+    /// Total number of allocated threads (any non-zero isRunning). Used by
+    /// the debug overlay to distinguish "scene complete" (numThreads==0) from
+    /// "scene running but blocked" (numThreads>0, activeThreadCount==0).
+    public var allocatedThreadCount: Int { scheduler.numThreads }
+
+    /// Per-thread isRunning states (for debugging "stuck scene" issues).
+    public var threadRunStates: [Int] { scheduler.threads.map { $0.isRunning } }
+
+    /// Snapshot of each running thread's state (for the debug overlay scrubber).
+    public var threadSnapshots: [TTMThreadSnapshot] { scheduler.threadSnapshots }
+
+    /// Set of TTM opcodes covered since the last beginADS call (for the debug overlay).
+    public var coveredTTMOpcodes: Set<UInt16> { TTMInterpreter.coveredOpcodes }
 
     /// Begin a new story sequence using the current date from `dateProvider`.
     /// Call once, then call `tick()` until `sequenceFinished`.
@@ -183,34 +202,54 @@ public final class StoryRunner {
             return 0
 
         case .walking(let walker, let walkBmp, let bgBmp):
-            guard var layer = scheduler.threads.first(where: { $0.isRunning == 1 })?.layer else {
-                // No thread slot allocated for walk yet — use a scratch layer
-                var scratch = GraphicsState.newLayer()
-                let delay = walker.animate(onto: &scratch, walkBmp: walkBmp,
-                                           bgBmp: bgBmp, graphics: graphics)
-                if delay == 0 { state = .idle }
-                scheduler.tick()
-                return delay
+            // The walk thread is claimed in startWalk(); look it up here.
+            // Framebuffer is a value type, so we copy → mutate → write back.
+            guard let walkThread = scheduler.threads.first(where: { $0.isRunning == 1 }) else {
+                // Lost the walk thread (shouldn't happen). Bail to .idle so
+                // we don't deadlock; the next tick will replan.
+                print("[story] walk thread missing, bailing to idle")
+                state = .idle
+                return 0
             }
+            var layer = walkThread.layer
             let delay = walker.animate(onto: &layer, walkBmp: walkBmp,
                                        bgBmp: bgBmp, graphics: graphics)
+            walkThread.layer = layer
             // Tick background/holiday (wave animation)
             scheduler.backgroundThread.timer = max(scheduler.backgroundThread.timer - 1, 0)
             if scheduler.backgroundThread.timer == 0 && scheduler.backgroundThread.isRunning != 0 {
                 scheduler.backgroundThread.timer = scheduler.backgroundThread.delay
                 scheduler.onBackgroundTick?()
             }
-            if delay == 0 { state = .idle }
+            if delay == 0 {
+                let walkIdx = scheduler.threads.firstIndex(where: { $0 === walkThread }) ?? -1
+                print("[walk] done, freeing thread idx=\(walkIdx)")
+                walkThread.free()
+                scheduler.numThreads = max(0, scheduler.numThreads - 1)
+                state = .idle
+            }
             return delay
 
-        case .playingScene:
+        case .playingScene(let n, let t):
             if scheduler.isFinished {
                 // Scene done — mark idle to pick next
+                print("[story] scene done: \(n) tag=\(t), advancing to \(scenePlanIndex + 2)/\(scenePlan.count)")
                 scenePlanIndex += 1
                 prevSpot = scenePlan[scenePlanIndex - 1].spotEnd
                 prevHdg  = scenePlan[scenePlanIndex - 1].hdgEnd
                 state = .idle
                 return 0
+            }
+            // Watchdog: count consecutive ticks where the scene has threads
+            // allocated but none are actively running. After 50 such ticks,
+            // dump the thread states so we can see why the scene is stuck.
+            playingTicks += 1
+            if playingTicks % 200 == 0 {
+                let states = scheduler.threads.enumerated()
+                    .filter { $0.element.isRunning != 0 }
+                    .map { "[\($0.offset)]=\($0.element.isRunning)" }
+                    .joined(separator: " ")
+                print("[story] still playing \(n) tag=\(t) after \(playingTicks) ticks; threads: \(states); numThreads=\(scheduler.numThreads)")
             }
             return scheduler.tick()
 
@@ -295,12 +334,30 @@ public final class StoryRunner {
             }
         }
 
+        // If the previous scene's TTM did a LOAD_SCREEN (e.g. a fishing
+        // close-up replaced the ocean island with ISLAND2.SCR), the island
+        // background is gone. Restore it before this island scene plays —
+        // otherwise this scene's walk and sprites render on top of the
+        // wrong background.
+        if scene.flags.contains(.island) && !graphics.isIslandBackground {
+            print("[story] restoring island background (clobbered by previous LOAD_SCREEN)")
+            try setupIsland(state: islandState, rng: &rng)
+        }
+
         // Walk to scene's start spot if we know where we are
         if prevSpot != -1 && scene.spotStart != 0 &&
            prevSpot != scene.spotStart {
+            print(String(format: "[story] walk %d → %d (hdg %d → %d)",
+                         prevSpot, scene.spotStart, prevHdg, scene.hdgStart))
             try startWalk(from: prevSpot, fromHdg: prevHdg,
                           to: scene.spotStart, toHdg: scene.hdgStart,
                           rng: &rng)
+            // Mark the walk's destination as our "current" position so when
+            // the walk completes and tick() re-enters transitionToNextScene
+            // for this same scene, the walk-condition is now false and we
+            // fall through to scheduler.beginADS instead of looping.
+            prevSpot = scene.spotStart
+            prevHdg  = scene.hdgStart
             return
         }
 
@@ -320,6 +377,12 @@ public final class StoryRunner {
         // Play the ADS scene
         let script = try cache.adsScript(named: scene.adsName)
         try scheduler.beginADS(script: script, tag: UInt16(scene.adsTag))
+        playingTicks = 0
+        print(String(format: "[story] scene[%d/%d] %@ tag=%d → activeThreads=%d numThreads=%d, dx=%d dy=%d",
+                     scenePlanIndex + 1, scenePlan.count,
+                     scene.adsName, scene.adsTag,
+                     scheduler.activeThreadCount, scheduler.numThreads,
+                     graphics.dx, graphics.dy))
         state = .playingScene(adsName: scene.adsName, adsTag: scene.adsTag)
     }
 
@@ -333,7 +396,7 @@ public final class StoryRunner {
         // Hook background thread (wave animation, ads.c:865–889)
         scheduler.backgroundThread.isRunning = 3  // special background state
         scheduler.backgroundThread.delay     = 8
-        scheduler.backgroundThread.timer     = 0
+        scheduler.backgroundThread.timer     = 8  // island.c:146: delay = timer = 8
         scheduler.onBackgroundTick = { [weak self] in
             guard let self else { return }
             self.islandRdr.animate(state: self.islandState)
@@ -361,7 +424,20 @@ public final class StoryRunner {
             bgBmp = try cache.bitmap(named: "BACKGRND.BMP")
         }
 
-        // Set up a scratch TTM thread for the walk layer
+        // Claim a free TTM thread to host the walk layer. The .walking case
+        // in tick() draws into this thread's layer (which is composited into
+        // the final frame). The thread is freed when the walk completes; if
+        // we get pre-empted, the next scheduler.beginADS will reset everything.
+        guard let walkThread = scheduler.threads.first(where: { $0.isRunning == 0 }) else {
+            print("[story] no free thread for walk; skipping")
+            return
+        }
+        let walkIdx = scheduler.threads.firstIndex(where: { $0 === walkThread }) ?? -1
+        walkThread.isRunning = 1
+        walkThread.layer     = GraphicsState.newLayer()
+        scheduler.numThreads += 1
+        print("[walk] claimed thread idx=\(walkIdx) (active=\(scheduler.activeThreadCount) numThreads=\(scheduler.numThreads))")
+
         let walkCtrl = WalkController(from: from, fromHdg: fromHdg,
                                       to: to, toHdg: toHdg,
                                       path: path)

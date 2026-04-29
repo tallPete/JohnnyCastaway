@@ -62,4 +62,26 @@ public struct EnginePalette: Sendable {
         // (v << 2) | (v >> 4) — exact match for PaletteScaling.vga6BitReplicated
         return (v << 2) | (v >> 4)
     }
+
+    /// The palette index that the original game treats as the transparent
+    /// colour key. jc_reborn keys on RGB(0xa8, 0, 0xa8) (graphics.c:222);
+    /// after our 6-bit→8-bit replication that becomes (0xAA, 0, 0xAA).
+    /// Sierra reorders the palette per-game, so we look up the index by
+    /// finding the entry closest to that target (Euclidean distance).
+    public var transparentIndex: UInt8 {
+        let target: (r: Int, g: Int, b: Int) = (0xAA, 0, 0xAA)
+        var bestIdx: Int = 0
+        var bestDist: Int = .max
+        for (i, c) in colors.enumerated() {
+            let dr = Int(c.r) - target.r
+            let dg = Int(c.g) - target.g
+            let db = Int(c.b) - target.b
+            let dist = dr*dr + dg*dg + db*db
+            if dist < bestDist {
+                bestDist = dist
+                bestIdx  = i
+            }
+        }
+        return UInt8(bestIdx)
+    }
 }

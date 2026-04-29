@@ -25,6 +25,18 @@ struct JohnnyDebugAppEntry: App {
 
     @State private var appState = AppState()
 
+    init() {
+        // Diagnostic: print the running executable path + build time so we
+        // can verify (in Xcode's console pane) which binary actually launched
+        // when something looks "stale".
+        let exe = CommandLine.arguments.first ?? "?"
+        let mtime: String = (try? FileManager.default
+            .attributesOfItem(atPath: exe)[.modificationDate] as? Date)
+            .map { ISO8601DateFormatter().string(from: $0) } ?? "?"
+        print("[JohnnyDebugApp] launched: \(exe)")
+        print("[JohnnyDebugApp] built:    \(mtime)")
+    }
+
     var body: some Scene {
         WindowGroup("Johnny Castaway Debug") {
             ContentView(appState: appState)
@@ -97,6 +109,9 @@ final class AppState {
 
         debugState.configure(engine: engine, storyRunner: storyRunner)
         loadError = nil
+
+        print(String(format: "[palette] transparent index = %d",
+                     storyRunner.palette.transparentIndex))
 
         // Wire the frame provider on the Metal view (if already created)
         wireFrameProvider()

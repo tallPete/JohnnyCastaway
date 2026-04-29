@@ -90,6 +90,7 @@ public final class Engine {
             pal = try rcache.firstPalette()
         }
         self.palette  = EnginePalette(from: pal)
+        graphics.transparentIndex = self.palette.transparentIndex
 
         self.scheduler = ADSScheduler(
             cache:    rcache,
@@ -107,6 +108,10 @@ public final class Engine {
     /// previous scene finishes.
     public func beginADS(name: String, tag: UInt16) throws {
         TTMInterpreter.coveredOpcodes = []
+        // Standalone scene playback has no story-level offset; reset here.
+        // (StoryRunner sets dx/dy itself before calling scheduler.beginADS.)
+        graphics.dx = 0
+        graphics.dy = 0
         let script = try cache.adsScript(named: name)
         try scheduler.beginADS(script: script, tag: tag)
     }

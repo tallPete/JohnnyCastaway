@@ -216,7 +216,7 @@ public final class EngineDebugState {
 
             storyDay      = runner.storyDay
             currentTick  += mini
-            pollDiagnostics(engine: nil)
+            pollDiagnosticsStoryLoop(runner: runner)
             return (runner.composedFramebuffer, runner.palette, mini)
 
         } catch {
@@ -258,4 +258,35 @@ public final class EngineDebugState {
         }
         lastSoundTrigger = soundSink.lastSampleID
     }
+
+    private func pollDiagnosticsStoryLoop(runner: StoryRunner) {
+        let prevActive = activeThreadCount
+        activeThreadCount  = runner.activeThreadCount
+        coveredOpcodeCount = runner.coveredTTMOpcodes.count
+        threadSnapshots    = runner.threadSnapshots
+        lastSoundTrigger   = soundSink.lastSampleID
+
+        // Darkness-gap detection: track when active TTM threads drop to 0
+        // (= no foreground animation rendering). When a new thread appears
+        // again, log how long the gap was.
+        if prevActive > 0 && activeThreadCount == 0 {
+            darknessStartTick = currentTick
+            print("[gap] start (prevActive=\(prevActive) → 0) at tick \(currentTick)")
+        } else if prevActive == 0 && activeThreadCount > 0,
+                  let start = darknessStartTick {
+            let gap = currentTick - start
+            print("[gap] end (active=\(activeThreadCount)) after \(gap) mini-ticks (~\(gap * 20)ms)")
+            darknessStartTick = nil
+        }
+
+        // Multi-thread spawning report. When more than 1 thread is active
+        // we want to know which scene caused it (multiple Johnnys symptom).
+        if activeThreadCount >= 2 && prevActive < 2 {
+            let names = threadSnapshots.map { "\($0.slotName):\($0.tag)" }
+                .joined(separator: ", ")
+            print("[concurrency] \(activeThreadCount) threads active simultaneously: \(names)")
+        }
+    }
+
+    private var darknessStartTick: Int? = nil
 }
