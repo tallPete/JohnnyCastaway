@@ -311,6 +311,24 @@ final class ADSScheduler {
         let threadIdx = threads.firstIndex(where: { $0 === freeThread }) ?? -1
         let slotName = ttmSlots[Int(slot)].resourceName
         print("[thread] spawn idx=\(threadIdx) slot=\(slot)(\(slotName)) tag=\(tag) sceneTimer=\(freeThread.sceneTimer) iter=\(freeThread.sceneIterations) ip=\(freeThread.ip) (numThreads=\(numThreads))")
+
+        // Run the new thread's first play() now so its initial draws land
+        // in the framebuffer before scheduler.tick returns. Without this,
+        // there is a one-tick gap between the previous thread's free and
+        // the new thread's first draw — Johnny vanishes for a frame
+        // between sub-scenes (the "flicker" symptom).
+        //
+        // jc_reborn doesn't need this because its grUpdateDisplay runs
+        // BEFORE post-process spawning (ads.c:691→729→760), so the previous
+        // thread's last draws are still on screen when triggers spawn the
+        // next thread. Our composedFramebuffer is captured AFTER the whole
+        // tick (post-process included), so we have to draw the new thread's
+        // first frame inline here.
+        freeThread.timer = freeThread.delay
+        TTMInterpreter.play(
+            thread: freeThread, graphics: graphics,
+            cache: cache, sound: sound
+        )
     }
 
     // ---------------------------------------------------------------
@@ -653,14 +671,13 @@ final class ADSScheduler {
                     t.sceneIterations -= 1
                     t.isRunning = 1
                     t.ip = ttmSlots[Int(t.sceneSlot)].findTag(t.sceneTag) ?? 0
-                    // Clear the layer on each iteration. jc_reborn doesn't do
-                    // this, but our combined fix (state-2 layers visible)
-                    // means stale draws from the previous iteration would
-                    // remain composited until the next CLEAR_SCREEN inside
-                    // the iteration body. For loops where the script doesn't
-                    // call CLEAR_SCREEN at the top of each iteration, this
-                    // produces visible "stacked" sprite trails.
-                    t.layer = GraphicsState.newLayer()
+                    // No layer clear here — match jc_reborn. The stacked-
+                    // sprite trails this was added to fix were actually
+                    // caused by the (now-fixed) tag scanner and DRAW_SPRITE
+                    // imageNo bugs, not by missing iteration-clear.
+                    // Clearing here causes a single-frame flicker at the
+                    // boundary of every iteration (layer goes empty until
+                    // the iteration's first opcodes draw something).
                 } else {
                     print("[thread] free idx=\(idx) slot=\(slotName) tag=\(t.sceneTag) (numThreads=\(numThreads - 1))")
                     let doneSlot = t.sceneSlot
