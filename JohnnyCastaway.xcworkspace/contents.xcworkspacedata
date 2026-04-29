@@ -16,4 +16,7 @@
    <FileRef
       location = "group:Apps/JohnnyDebugApp">
    </FileRef>
+   <FileRef
+      location = "group:Apps/JohnnyScreenSaver">
+   </FileRef>
 </Workspace>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle identity -->
+    <key>CFBundleIdentifier</key>
+    <string>nz.petesmith.JohnnyScreenSaver</string>
+    <key>CFBundleName</key>
+    <string>Johnny Castaway</string>
+    <key>CFBundleDisplayName</key>
+    <string>Johnny Castaway</string>
+    <key>CFBundleExecutable</key>
+    <string>JohnnyScreenSaver</string>
+
+    <!-- A .saver bundle is a macOS plugin (BNDL).
+         The legacyScreenSaver host loads it via CFBundle. -->
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.6</string>
+
+    <!-- The class the host instantiates per-display.
+         @objc(JohnnyScreenSaverView) on the Swift class makes its
+         Objective-C runtime name match this exactly. -->
+    <key>NSPrincipalClass</key>
+    <string>JohnnyScreenSaverView</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <!-- Required for crisp Metal rendering on Retina displays;
+         without it the CAMetalLayer drawable scales at 1x. -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>
