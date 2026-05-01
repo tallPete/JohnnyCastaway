@@ -1,18 +1,27 @@
 // ResourceFolder.swift
 //
-// Persists the user's chosen Sierra resource folder via a security-
-// scoped bookmark stored in ScreenSaverDefaults. The .saver runs
-// inside the legacyScreenSaver host process, which is sandboxed —
-// arbitrary file paths won't work, but Powerbox grants per-URL
-// access via NSOpenPanel and that access can be persisted across
-// process restarts via security-scoped bookmarks.
+// Persists the user's chosen Sierra resource folder path in
+// ScreenSaverDefaults.  Both the System Settings preview pane (running
+// in the System Settings process) and the full-screen legacyScreenSaver
+// process use the same ScreenSaverDefaults plist file keyed by bundle ID,
+// so a path saved in one is visible in the other.
+//
+// We intentionally do NOT use security-scoped bookmarks:
+//   • Security-scoped bookmarks are tied to the sandbox of the
+//     *creating* application.  A bookmark created in System Settings
+//     cannot be resolved in legacyScreenSaver — they are separate
+//     sandbox containers — so resolve() would silently return nil on
+//     every legacyScreenSaver launch even though the data was written.
+//   • legacyScreenSaver on modern macOS has read access to the user's
+//     home directory, so a plain-path URL returned from NSOpenPanel
+//     works without any bookmark machinery.
 //
 // Flow:
-//   1. Configure sheet calls openPanel() → user picks a folder
-//   2. We create a bookmark with .withSecurityScope and store it
-//   3. On saver start, resolve() unpacks the bookmark and starts
-//      access. Caller must call stopAccessingSecurityScopedResource()
-//      in teardown to release.
+//   1. Configure sheet / first-run panel opens NSOpenPanel; user picks
+//      a folder.
+//   2. save(folder:) validates the folder and stores the plain path.
+//   3. resolve() returns the stored URL if the folder still exists and
+//      contains RESOURCE.MAP.
 
 import Foundation
 import AppKit
@@ -20,92 +29,80 @@ import ScreenSaver
 
 enum ResourceFolder {
 
-    private static let bookmarkKey = "ResourceFolderBookmark"
-    private static let pathHintKey = "ResourceFolderPath"  // for display only
+    private static let pathKey = "ResourceFolderPath"
 
-    private static var defaults: UserDefaults {
-        ScreenSaverDefaults(forModuleWithName: bundleID) ?? .standard
-    }
+    // Cache the defaults object.  ScreenSaverDefaults(forModuleWithName:)
+    // can return nil if called before the bundle is registered; the lazy
+    // initialiser runs on first access, which is always after init().
+    // UserDefaults is internally thread-safe; nonisolated(unsafe) satisfies
+    // Swift 6's mutable-global-variable check without adding actor overhead.
+    private nonisolated(unsafe) static let sharedDefaults: UserDefaults = {
+        let id = Bundle(for: JohnnyScreenSaverView.self).bundleIdentifier
+                     ?? "nz.petesmith.JohnnyScreenSaver"
+        NSLog("[Johnny] ResourceFolder: opening ScreenSaverDefaults for '%@'", id)
+        if let sd = ScreenSaverDefaults(forModuleWithName: id) {
+            NSLog("[Johnny] ResourceFolder: ScreenSaverDefaults OK")
+            return sd
+        }
+        NSLog("[Johnny] ResourceFolder: ScreenSaverDefaults returned nil — falling back to UserDefaults.standard")
+        return .standard
+    }()
 
-    private static var bundleID: String {
-        Bundle(for: JohnnyScreenSaverView.self).bundleIdentifier
-            ?? "nz.petesmith.JohnnyScreenSaver"
-    }
+    // ---------------------------------------------------------------
+    // MARK: Public API
+    // ---------------------------------------------------------------
 
-    /// Resolve the saved bookmark, start access, and return the URL.
-    /// Returns nil if no bookmark is set or it can't be resolved.
-    /// Caller is responsible for calling
-    /// `url.stopAccessingSecurityScopedResource()` on teardown.
+    /// Return the URL of the configured resource folder if it exists
+    /// and contains RESOURCE.MAP.  Returns nil if not configured or
+    /// the folder has been moved / deleted.
     static func resolve() -> URL? {
-        guard let data = defaults.data(forKey: bookmarkKey) else {
+        guard let path = sharedDefaults.string(forKey: pathKey) else {
+            NSLog("[Johnny] ResourceFolder.resolve: no path in defaults")
             return nil
         }
-        var stale = false
-        do {
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &stale
-            )
-            guard url.startAccessingSecurityScopedResource() else {
-                NSLog("[Johnny] bookmark resolved but access denied")
-                return nil
-            }
-            if stale {
-                // Rebuild the bookmark for next time
-                if let newData = try? url.bookmarkData(
-                    options: [.withSecurityScope],
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                ) {
-                    defaults.set(newData, forKey: bookmarkKey)
-                    defaults.synchronize()
-                }
-            }
-            return url
-        } catch {
-            NSLog("[Johnny] failed to resolve bookmark: \(error)")
+        NSLog("[Johnny] ResourceFolder.resolve: stored path = %@", path)
+        let url    = URL(fileURLWithPath: path)
+        let mapURL = url.appendingPathComponent("RESOURCE.MAP")
+        guard FileManager.default.fileExists(atPath: mapURL.path) else {
+            NSLog("[Johnny] ResourceFolder.resolve: RESOURCE.MAP not found at %@", mapURL.path)
             return nil
         }
+        NSLog("[Johnny] ResourceFolder.resolve: folder OK → %@", url.path)
+        return url
     }
 
     /// The display path of the configured folder (for the settings
-    /// sheet's "currently configured: …" label). Doesn't grant access.
+    /// sheet's "currently configured: …" label).  Does not validate.
     static var displayPath: String? {
-        defaults.string(forKey: pathHintKey)
+        sharedDefaults.string(forKey: pathKey)
     }
 
-    /// Persist a bookmark to the user-picked folder.
-    /// Verifies the folder contains the expected RESOURCE.MAP /
-    /// RESOURCE.001 files first; throws if they're missing so the
-    /// settings sheet can surface an error.
+    /// Persist the user-picked folder path.
+    ///
+    /// Validates that RESOURCE.MAP and RESOURCE.001 are present;
+    /// throws ``FolderError`` if either is missing.
     static func save(folder url: URL) throws {
+        NSLog("[Johnny] ResourceFolder.save: validating %@", url.path)
+        let fm = FileManager.default
         let mapURL  = url.appendingPathComponent("RESOURCE.MAP")
         let dataURL = url.appendingPathComponent("RESOURCE.001")
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: mapURL.path) else {
-            throw FolderError.missingFile("RESOURCE.MAP")
-        }
-        guard fm.fileExists(atPath: dataURL.path) else {
-            throw FolderError.missingFile("RESOURCE.001")
-        }
-        let data = try url.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
-        defaults.set(data, forKey: bookmarkKey)
-        defaults.set(url.path, forKey: pathHintKey)
-        defaults.synchronize()
+        guard fm.fileExists(atPath: mapURL.path)  else { throw FolderError.missingFile("RESOURCE.MAP")  }
+        guard fm.fileExists(atPath: dataURL.path) else { throw FolderError.missingFile("RESOURCE.001") }
+        sharedDefaults.set(url.path, forKey: pathKey)
+        let ok = sharedDefaults.synchronize()
+        NSLog("[Johnny] ResourceFolder.save: saved path=%@ synchronize()=%d", url.path, ok ? 1 : 0)
     }
 
     /// Forget the saved folder.
     static func clear() {
-        defaults.removeObject(forKey: bookmarkKey)
-        defaults.removeObject(forKey: pathHintKey)
-        defaults.synchronize()
+        sharedDefaults.removeObject(forKey: pathKey)
+        sharedDefaults.synchronize()
+        NSLog("[Johnny] ResourceFolder.clear: done")
     }
+
+    // ---------------------------------------------------------------
+    // MARK: Errors
+    // ---------------------------------------------------------------
 
     enum FolderError: LocalizedError {
         case missingFile(String)

@@ -14,11 +14,11 @@
 //     legacyScreenSaver process at high CPU after dismissal.
 //
 // Resource onboarding: the user picks a folder via the configure
-// sheet; we store a security-scoped bookmark in
-// ScreenSaverDefaults(forModuleWithName: BUNDLE_ID). On next launch
-// we resolve the bookmark and start access. If no bookmark is set
-// (first run), we render the "needs resources" idle frame instead of
-// failing.
+// sheet or the first-run floating panel; we store the plain path in
+// ScreenSaverDefaults(forModuleWithName:).  See ResourceFolder.swift.
+// We intentionally avoid security-scoped bookmarks because they are
+// sandbox-scoped to the creating process and cannot be resolved in
+// legacyScreenSaver (a separate sandbox container).
 
 import ScreenSaver
 import AppKit
@@ -32,12 +32,11 @@ import JohnnyMetalRenderer
 /// the bundle loaded (in System Settings or legacyScreenSaver) before
 /// any class methods are touched.
 private let _bundleLoadMarker: Void = {
-    NSLog("[Johnny] dylib loaded by \(ProcessInfo.processInfo.processName)")
+    NSLog("[Johnny] dylib loaded by %@", ProcessInfo.processInfo.processName)
 }()
 
 @objc(JohnnyScreenSaverView)
 public final class JohnnyScreenSaverView: ScreenSaverView {
-
 
     // ---------------------------------------------------------------
     // MARK: Engine state (per-instance — never shared across displays)
@@ -66,10 +65,6 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     }
     private var loadState: LoadState = .notLoaded
 
-    /// Held while we're using the user's chosen resource folder.
-    /// Released in teardown so the system can revoke access cleanly.
-    private var resourceFolderURL: URL?
-
     /// True once we have scheduled (or shown) the first-run resource
     /// picker panel. Prevents re-presenting on every startAnimation call
     /// (the preview pane can call startAnimation many times).
@@ -87,7 +82,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // which animateOneFrame() is called. We pace internally
         // anyway, so a high cadence (1/30 s) is fine.
         animationTimeInterval = 1.0 / 30.0
-        NSLog("[Johnny] init(frame:isPreview:) preview=\(isPreview)")
+        NSLog("[Johnny] init(frame:isPreview:) preview=%d", isPreview ? 1 : 0)
     }
 
     public required init?(coder: NSCoder) {
@@ -173,10 +168,17 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     private func startupIfNeeded() {
-        guard renderer == nil else { return }   // already running
+        guard renderer == nil else {
+            NSLog("[Johnny] startupIfNeeded: already running, skipping")
+            return
+        }
+
+        NSLog("[Johnny] startupIfNeeded: starting — process=%@",
+              ProcessInfo.processInfo.processName)
 
         // 1. Metal device + renderer
         guard let device = MTLCreateSystemDefaultDevice() else {
+            NSLog("[Johnny] startupIfNeeded: no Metal device")
             loadState = .error("No Metal device")
             return
         }
@@ -186,35 +188,41 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         }
         do {
             renderer = try EngineRenderer(device: device)
+            NSLog("[Johnny] startupIfNeeded: renderer created")
         } catch {
+            NSLog("[Johnny] startupIfNeeded: renderer error — %@", error.localizedDescription)
             loadState = .error("Renderer: \(error.localizedDescription)")
             return
         }
 
-        // 2. Resolve user's resource folder via security-scoped bookmark
+        // 2. Resolve user's resource folder from stored path
         guard let folder = ResourceFolder.resolve() else {
+            NSLog("[Johnny] startupIfNeeded: no resource folder — showing idle frame")
             loadState = .notLoaded
             return
         }
-        resourceFolderURL = folder
 
         // 3. Parse archive + spin up StoryRunner
         do {
             let mapURL       = folder.appendingPathComponent("RESOURCE.MAP")
             let containerURL = folder.appendingPathComponent("RESOURCE.001")
+            NSLog("[Johnny] startupIfNeeded: loading archive from %@", folder.path)
             let mapData       = try Data(contentsOf: mapURL)
             let containerData = try Data(contentsOf: containerURL)
             let archive = try ResourceArchive.parse(map: mapData, container: containerData)
+            NSLog("[Johnny] startupIfNeeded: archive parsed OK")
 
             let runner = try StoryRunner(
                 archive:      archive,
                 dateProvider: SystemDateProvider(),
                 sound:        soundSink
             )
-            self.storyRunner = runner
-            self.loadState   = .loaded
+            NSLog("[Johnny] startupIfNeeded: StoryRunner created — engine is live")
+            self.storyRunner  = runner
+            self.loadState    = .loaded
             self.lastTickWall = CACurrentMediaTime()
         } catch {
+            NSLog("[Johnny] startupIfNeeded: archive/engine error — %@", error.localizedDescription)
             loadState = .error("Resources: \(error.localizedDescription)")
         }
     }
@@ -228,10 +236,10 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // fallback path for macOS 26 Tahoe where System Settings no longer
     // contacts the .saver bundle for its configure sheet.
     //
-    // We present a floating NSPanel (not a sheet — we have no parent
-    // window in the normal screen-saver flow) containing an NSOpenPanel
-    // so the user can locate their Sierra resource files without having
-    // to navigate System Settings → Screen Saver Options.
+    // We present a floating NSPanel at window level .floating (above the
+    // screensaver view), then attach the NSOpenPanel as a *sheet* on that
+    // panel so it inherits the correct z-order and doesn't slip behind
+    // other windows.
 
     @MainActor
     private func presentResourcePickerIfNeeded() {
@@ -239,14 +247,15 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // (e.g. configure sheet arrived after all) between the async
         // dispatch and now.
         guard ResourceFolder.resolve() == nil else {
-            // Already configured — just restart.
+            NSLog("[Johnny] presentResourcePickerIfNeeded: folder already configured — restarting")
             resetAndStartup()
             return
         }
 
-        NSLog("[Johnny] presenting first-run resource picker panel")
+        NSLog("[Johnny] presentResourcePickerIfNeeded: showing setup panel")
 
-        // ---- Informational panel -----------------------------------------
+        // ---- Informational panel ----------------------------------------
+
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 180),
             styleMask: [.titled, .closable],
@@ -300,31 +309,36 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         cancelButton.frame = NSRect(x: 360, y: 16, width: 100, height: 32)
         content.addSubview(cancelButton)
 
-        // ---- Button handlers (closures avoid an ObjC target object) ------
+        // ---- Button handlers -------------------------------------------
+        // Capture self weakly to avoid a retain cycle.
 
-        // Capture self weakly to avoid a retain cycle keeping the saver
-        // alive after teardown.
         let chooseClosure: @Sendable @MainActor () -> Void = { [weak self] in
             let openPanel = NSOpenPanel()
-            openPanel.message                = "Select the folder containing RESOURCE.MAP and RESOURCE.001"
-            openPanel.prompt                 = "Choose"
-            openPanel.canChooseFiles         = false
-            openPanel.canChooseDirectories   = true
+            openPanel.message                 = "Select the folder containing RESOURCE.MAP and RESOURCE.001"
+            openPanel.prompt                  = "Choose"
+            openPanel.canChooseFiles          = false
+            openPanel.canChooseDirectories    = true
             openPanel.allowsMultipleSelection = false
 
-            guard openPanel.runModal() == .OK, let url = openPanel.url else { return }
-
-            do {
-                try ResourceFolder.save(folder: url)
-                panelRef.close()
-                // Re-run startup now that we have a folder.
-                self?.resetAndStartup()
-            } catch {
-                statusLabel.stringValue = error.localizedDescription
+            // Present as a sheet attached to our floating panel so it
+            // inherits the .floating window level and can't slip behind
+            // other windows.
+            openPanel.beginSheetModal(for: panelRef) { [weak self] response in
+                guard response == .OK, let url = openPanel.url else { return }
+                NSLog("[Johnny] openPanel chose: %@", url.path)
+                do {
+                    try ResourceFolder.save(folder: url)
+                    panelRef.close()
+                    self?.resetAndStartup()
+                } catch {
+                    NSLog("[Johnny] openPanel save error: %@", error.localizedDescription)
+                    statusLabel.stringValue = error.localizedDescription
+                }
             }
         }
 
         let cancelClosure: @Sendable @MainActor () -> Void = {
+            NSLog("[Johnny] setup panel cancelled")
             panelRef.close()
         }
 
@@ -351,13 +365,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// Reset engine state so `startupIfNeeded()` will re-run.
     /// Used after the user configures the resource folder at runtime.
     private func resetAndStartup() {
-        // Tear down any partially-initialised renderer.
+        NSLog("[Johnny] resetAndStartup")
         renderer    = nil
         storyRunner = nil
-        if let url = resourceFolderURL {
-            url.stopAccessingSecurityScopedResource()
-            resourceFolderURL = nil
-        }
         startupIfNeeded()
     }
 
@@ -366,12 +376,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     private func teardown() {
+        NSLog("[Johnny] teardown")
         renderer    = nil
         storyRunner = nil
-        if let url = resourceFolderURL {
-            url.stopAccessingSecurityScopedResource()
-            resourceFolderURL = nil
-        }
     }
 
     // ---------------------------------------------------------------
@@ -397,6 +404,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                     renderer.update(framebuffer: runner.composedFramebuffer,
                                     palette:    runner.palette)
                 } catch {
+                    NSLog("[Johnny] animateOneFrame tick error: %@", error.localizedDescription)
                     loadState = .error("Tick: \(error.localizedDescription)")
                 }
             }
@@ -421,7 +429,8 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     @objc public override var configureSheet: NSWindow? {
         NSLog("[Johnny] configureSheet getter called")
         let win = ConfigureSheetController.shared.window
-        NSLog("[Johnny] configureSheet returning window=\(win) visible=\(win.isVisible) frame=\(NSStringFromRect(win.frame))")
+        NSLog("[Johnny] configureSheet returning window=%@ visible=%d",
+              String(describing: win), win.isVisible ? 1 : 0)
         return win
     }
 }
