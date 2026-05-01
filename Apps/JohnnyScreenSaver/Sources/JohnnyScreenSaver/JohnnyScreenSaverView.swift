@@ -120,19 +120,30 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         super.startAnimation()
         startupIfNeeded()
 
-        // Belt-and-suspenders first-run onboarding: if there's still no
-        // resource folder after startup (System Settings never called our
-        // configure sheet — a known regression on macOS 26 Tahoe), present
-        // a floating resource-picker panel directly from the saver.
+        // First-run / error-recovery onboarding: if the engine didn't
+        // start (no folder configured, or archive failed to load), show
+        // the resource-picker panel.
         //
-        // Guard: skip in preview (the preview pane resizes/restarts often)
-        // and skip if we've already scheduled the picker this session.
-        if case .notLoaded = loadState,
-           !isPreview,
-           !didScheduleResourcePicker {
+        // We intentionally do NOT gate on !isPreview: on macOS 26 Tahoe
+        // isPreview can be true even for full-screen activation (a known
+        // Sequoia-era regression), so filtering on it silently suppresses
+        // the dialog for everyone.  The didScheduleResourcePicker flag
+        // already prevents repeated presentation on rapid start/stop cycles.
+        let needsOnboarding: Bool = {
+            switch loadState {
+            case .notLoaded, .error: return true
+            case .loaded:            return false
+            }
+        }()
+        NSLog("[Johnny] startAnimation: isPreview=%d loadState=%@ needsOnboarding=%d",
+              isPreview ? 1 : 0,
+              { switch loadState { case .notLoaded: return "notLoaded"
+                                   case .loaded:    return "loaded"
+                                   case .error(let e): return "error(\(e))" } }(),
+              needsOnboarding ? 1 : 0)
+
+        if needsOnboarding, !didScheduleResourcePicker {
             didScheduleResourcePicker = true
-            // Defer to the next run-loop turn so startAnimation returns
-            // before we run a modal panel.
             DispatchQueue.main.async { [weak self] in
                 self?.presentResourcePickerIfNeeded()
             }
@@ -386,10 +397,19 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     private func teardown() {
-        NSLog("[Johnny] teardown")
+        NSLog("[Johnny] teardown — loadState was %@",
+              { switch loadState { case .notLoaded: return "notLoaded"
+                                   case .loaded:    return "loaded"
+                                   case .error(let e): return "error(\(e))" } }())
         renderer    = nil
         storyRunner = nil
         soundSink   = NullSoundSink()   // releases AVAudioPlayer instances
+        // If we never successfully loaded, allow the picker to reappear
+        // next time startAnimation fires (e.g. user dismisses screensaver
+        // then re-triggers the hot corner without ever having configured).
+        if case .loaded = loadState { } else {
+            didScheduleResourcePicker = false
+        }
     }
 
     // ---------------------------------------------------------------
