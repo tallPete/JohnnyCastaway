@@ -202,7 +202,17 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             return
         }
 
-        // 3. Parse archive + spin up StoryRunner
+        // 3. Sound sink — create before the StoryRunner so the sink's
+        //    AVAudioPlayers are preloaded from the same folder.
+        if ResourceFolder.soundEnabled {
+            soundSink = AVAudioPlayerSoundSink(folder: folder)
+            NSLog("[Johnny] startupIfNeeded: sound ON")
+        } else {
+            soundSink = NullSoundSink()
+            NSLog("[Johnny] startupIfNeeded: sound OFF")
+        }
+
+        // 4. Parse archive + spin up StoryRunner
         do {
             let mapURL       = folder.appendingPathComponent("RESOURCE.MAP")
             let containerURL = folder.appendingPathComponent("RESOURCE.001")
@@ -379,6 +389,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         NSLog("[Johnny] teardown")
         renderer    = nil
         storyRunner = nil
+        soundSink   = NullSoundSink()   // releases AVAudioPlayer instances
     }
 
     // ---------------------------------------------------------------

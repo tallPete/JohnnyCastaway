@@ -29,7 +29,8 @@ import ScreenSaver
 
 enum ResourceFolder {
 
-    private static let pathKey = "ResourceFolderPath"
+    private static let pathKey          = "ResourceFolderPath"
+    private static let soundEnabledKey  = "SoundEnabled"
 
     // Cache the defaults object.  ScreenSaverDefaults(forModuleWithName:)
     // can return nil if called before the bundle is registered; the lazy
@@ -91,6 +92,24 @@ enum ResourceFolder {
         sharedDefaults.set(url.path, forKey: pathKey)
         let ok = sharedDefaults.synchronize()
         NSLog("[Johnny] ResourceFolder.save: saved path=%@ synchronize()=%d", url.path, ok ? 1 : 0)
+    }
+
+    /// Whether the user has sound enabled.
+    ///
+    /// Defaults to `true` (absent key → on) so sounds work out of the
+    /// box before the configure sheet is set up.
+    static var soundEnabled: Bool {
+        get {
+            // UserDefaults.bool(forKey:) returns false for a missing key,
+            // but we want the default to be true.
+            guard sharedDefaults.object(forKey: soundEnabledKey) != nil else { return true }
+            return sharedDefaults.bool(forKey: soundEnabledKey)
+        }
+        set {
+            sharedDefaults.set(newValue, forKey: soundEnabledKey)
+            sharedDefaults.synchronize()
+            NSLog("[Johnny] ResourceFolder.soundEnabled = %d", newValue ? 1 : 0)
+        }
     }
 
     /// Forget the saved folder.
