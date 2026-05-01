@@ -78,6 +78,19 @@ if ! nm -gU "$SAVER_BUNDLE/Contents/MacOS/$SAVER_NAME" 2>/dev/null \
     echo "  legacyScreenSaver may fail to instantiate the view." >&2
 fi
 
+echo "==> Signing bundle (ad-hoc)…"
+# Strip any Finder metadata / resource forks first — codesign refuses to
+# seal a bundle that has them.  Then re-sign the whole bundle so that:
+#   • The identifier becomes nz.petesmith.JohnnyScreenSaver (from Info.plist)
+#   • Info.plist is bound into the CodeDirectory
+#   • Sealed Resources are created
+# Without this step the linker leaves only an adhoc,linker-signed stub on
+# the Mach-O, which does NOT bind Info.plist — System Settings never matches
+# the bundle to its configure-sheet entry.
+xattr -cr "$SAVER_BUNDLE"
+codesign --force --deep --sign - "$SAVER_BUNDLE"
+codesign --verify --verbose "$SAVER_BUNDLE"
+
 echo "==> Built: $SAVER_BUNDLE"
 
 if [[ $INSTALL -eq 1 ]]; then
@@ -85,6 +98,8 @@ if [[ $INSTALL -eq 1 ]]; then
     mkdir -p "$INSTALL_DIR"
     rm -rf "$INSTALL_DIR/$SAVER_NAME.saver"
     cp -R "$SAVER_BUNDLE" "$INSTALL_DIR/"
+    # Strip any xattrs cp -R may have added to the installed copy.
+    xattr -cr "$INSTALL_DIR/$SAVER_NAME.saver"
     echo "==> Installed: $INSTALL_DIR/$SAVER_NAME.saver"
 
     if [[ $RELOAD -eq 1 ]]; then
