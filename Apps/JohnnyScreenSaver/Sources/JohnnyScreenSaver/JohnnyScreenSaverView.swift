@@ -70,6 +70,11 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// Released in teardown so the system can revoke access cleanly.
     private var resourceFolderURL: URL?
 
+    /// True once we have scheduled (or shown) the first-run resource
+    /// picker panel. Prevents re-presenting on every startAnimation call
+    /// (the preview pane can call startAnimation many times).
+    private var didScheduleResourcePicker = false
+
     // ---------------------------------------------------------------
     // MARK: Init
     // ---------------------------------------------------------------
@@ -119,6 +124,24 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     public override func startAnimation() {
         super.startAnimation()
         startupIfNeeded()
+
+        // Belt-and-suspenders first-run onboarding: if there's still no
+        // resource folder after startup (System Settings never called our
+        // configure sheet — a known regression on macOS 26 Tahoe), present
+        // a floating resource-picker panel directly from the saver.
+        //
+        // Guard: skip in preview (the preview pane resizes/restarts often)
+        // and skip if we've already scheduled the picker this session.
+        if case .notLoaded = loadState,
+           !isPreview,
+           !didScheduleResourcePicker {
+            didScheduleResourcePicker = true
+            // Defer to the next run-loop turn so startAnimation returns
+            // before we run a modal panel.
+            DispatchQueue.main.async { [weak self] in
+                self?.presentResourcePickerIfNeeded()
+            }
+        }
     }
 
     public override func stopAnimation() {
@@ -197,6 +220,148 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     }
 
     // ---------------------------------------------------------------
+    // MARK: First-run resource picker (Option B fallback)
+    // ---------------------------------------------------------------
+    //
+    // Called asynchronously from startAnimation when the engine couldn't
+    // start because no resource folder has been configured. This is the
+    // fallback path for macOS 26 Tahoe where System Settings no longer
+    // contacts the .saver bundle for its configure sheet.
+    //
+    // We present a floating NSPanel (not a sheet — we have no parent
+    // window in the normal screen-saver flow) containing an NSOpenPanel
+    // so the user can locate their Sierra resource files without having
+    // to navigate System Settings → Screen Saver Options.
+
+    @MainActor
+    private func presentResourcePickerIfNeeded() {
+        // Re-check: another code path might have resolved the folder
+        // (e.g. configure sheet arrived after all) between the async
+        // dispatch and now.
+        guard ResourceFolder.resolve() == nil else {
+            // Already configured — just restart.
+            resetAndStartup()
+            return
+        }
+
+        NSLog("[Johnny] presenting first-run resource picker panel")
+
+        // ---- Informational panel -----------------------------------------
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 180),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Johnny Castaway — Setup"
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating        // appears above the screen-saver view
+        panel.center()
+
+        let content = panel.contentView!
+
+        let heading = NSTextField(labelWithString: "Sierra Resource Files Required")
+        heading.font = .boldSystemFont(ofSize: 14)
+        heading.frame = NSRect(x: 20, y: 136, width: 440, height: 20)
+        content.addSubview(heading)
+
+        let body = NSTextField(wrappingLabelWithString:
+            "Johnny Castaway needs the original Sierra resource files to run. "
+          + "Click \u{201C}Choose Folder\u{2026}\u{201D} and select the folder that contains "
+          + "RESOURCE.MAP and RESOURCE.001."
+        )
+        body.frame = NSRect(x: 20, y: 72, width: 440, height: 56)
+        content.addSubview(body)
+
+        let statusLabel = NSTextField(labelWithString: "")
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .systemRed
+        statusLabel.frame = NSRect(x: 20, y: 52, width: 440, height: 16)
+        content.addSubview(statusLabel)
+
+        // Keep a strong reference for the lifetime of the handler closures.
+        let panelRef = panel
+
+        let chooseButton = NSButton(
+            title: "Choose Folder…",
+            target: nil,
+            action: nil
+        )
+        chooseButton.bezelStyle = .rounded
+        chooseButton.frame = NSRect(x: 20, y: 16, width: 140, height: 32)
+        content.addSubview(chooseButton)
+
+        let cancelButton = NSButton(
+            title: "Cancel",
+            target: nil,
+            action: nil
+        )
+        cancelButton.bezelStyle = .rounded
+        cancelButton.frame = NSRect(x: 360, y: 16, width: 100, height: 32)
+        content.addSubview(cancelButton)
+
+        // ---- Button handlers (closures avoid an ObjC target object) ------
+
+        // Capture self weakly to avoid a retain cycle keeping the saver
+        // alive after teardown.
+        let chooseClosure: @Sendable @MainActor () -> Void = { [weak self] in
+            let openPanel = NSOpenPanel()
+            openPanel.message                = "Select the folder containing RESOURCE.MAP and RESOURCE.001"
+            openPanel.prompt                 = "Choose"
+            openPanel.canChooseFiles         = false
+            openPanel.canChooseDirectories   = true
+            openPanel.allowsMultipleSelection = false
+
+            guard openPanel.runModal() == .OK, let url = openPanel.url else { return }
+
+            do {
+                try ResourceFolder.save(folder: url)
+                panelRef.close()
+                // Re-run startup now that we have a folder.
+                self?.resetAndStartup()
+            } catch {
+                statusLabel.stringValue = error.localizedDescription
+            }
+        }
+
+        let cancelClosure: @Sendable @MainActor () -> Void = {
+            panelRef.close()
+        }
+
+        // Wrap closures in shim targets so AppKit can call them.
+        let chooseTarget = ClosureTarget(closure: chooseClosure)
+        let cancelTarget = ClosureTarget(closure: cancelClosure)
+
+        chooseButton.target = chooseTarget
+        chooseButton.action = #selector(ClosureTarget.invoke)
+        cancelButton.target = cancelTarget
+        cancelButton.action = #selector(ClosureTarget.invoke)
+
+        // Retain the targets for the panel's lifetime via associated objects.
+        objc_setAssociatedObject(panel, &assocKeyChooseTarget, chooseTarget, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(panel, &assocKeyCancelTarget, cancelTarget, .OBJC_ASSOCIATION_RETAIN)
+
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    // ---------------------------------------------------------------
+    // MARK: Reset + restart helper
+    // ---------------------------------------------------------------
+
+    /// Reset engine state so `startupIfNeeded()` will re-run.
+    /// Used after the user configures the resource folder at runtime.
+    private func resetAndStartup() {
+        // Tear down any partially-initialised renderer.
+        renderer    = nil
+        storyRunner = nil
+        if let url = resourceFolderURL {
+            url.stopAccessingSecurityScopedResource()
+            resourceFolderURL = nil
+        }
+        startupIfNeeded()
+    }
+
+    // ---------------------------------------------------------------
     // MARK: Teardown (Sonoma-reliable)
     // ---------------------------------------------------------------
 
@@ -260,3 +425,31 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         return win
     }
 }
+
+// ---------------------------------------------------------------------------
+// MARK: - ClosureTarget
+//
+// A minimal Objective-C-compatible shim that lets us use a Swift closure as
+// the `target` of an NSButton.  AppKit's target/action mechanism requires
+// the target to respond to the selector via the ObjC runtime, which plain
+// Swift closures don't support.
+// ---------------------------------------------------------------------------
+
+@MainActor
+private final class ClosureTarget: NSObject {
+    private let closure: @MainActor () -> Void
+    init(closure: @escaping @MainActor () -> Void) { self.closure = closure }
+    @objc func invoke() { closure() }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - Associated-object keys
+//
+// objc_setAssociatedObject requires a stable UnsafeRawPointer key.
+// The canonical Swift pattern is a file-scope `nonisolated(unsafe) var`
+// whose address is stable for the process lifetime.  Swift 6 strict
+// concurrency requires the `nonisolated(unsafe)` annotation.
+// ---------------------------------------------------------------------------
+
+private nonisolated(unsafe) var assocKeyChooseTarget: UInt8 = 0
+private nonisolated(unsafe) var assocKeyCancelTarget: UInt8 = 0
