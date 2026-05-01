@@ -28,8 +28,16 @@ import JohnnyResources
 import JohnnyEngine
 import JohnnyMetalRenderer
 
+/// Fires once when the dylib is dlopened by the host. Lets us prove
+/// the bundle loaded (in System Settings or legacyScreenSaver) before
+/// any class methods are touched.
+private let _bundleLoadMarker: Void = {
+    NSLog("[Johnny] dylib loaded by \(ProcessInfo.processInfo.processName)")
+}()
+
 @objc(JohnnyScreenSaverView)
 public final class JohnnyScreenSaverView: ScreenSaverView {
+
 
     // ---------------------------------------------------------------
     // MARK: Engine state (per-instance — never shared across displays)
@@ -67,18 +75,21 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     public override init?(frame: NSRect, isPreview: Bool) {
+        _ = _bundleLoadMarker
         super.init(frame: frame, isPreview: isPreview)
         wantsLayer = true
         // ScreenSaverView's animationTimeInterval is the cadence at
         // which animateOneFrame() is called. We pace internally
         // anyway, so a high cadence (1/30 s) is fine.
         animationTimeInterval = 1.0 / 30.0
+        NSLog("[Johnny] init(frame:isPreview:) preview=\(isPreview)")
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
         animationTimeInterval = 1.0 / 30.0
+        NSLog("[Johnny] init(coder:)")
     }
 
     // ---------------------------------------------------------------
@@ -237,9 +248,15 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // MARK: Configuration sheet
     // ---------------------------------------------------------------
 
-    public override var hasConfigureSheet: Bool { true }
+    @objc public override var hasConfigureSheet: Bool {
+        NSLog("[Johnny] hasConfigureSheet -> true")
+        return true
+    }
 
-    public override var configureSheet: NSWindow? {
-        return ConfigureSheetController.shared.window
+    @objc public override var configureSheet: NSWindow? {
+        NSLog("[Johnny] configureSheet getter called")
+        let win = ConfigureSheetController.shared.window
+        NSLog("[Johnny] configureSheet returning window=\(win) visible=\(win.isVisible) frame=\(NSStringFromRect(win.frame))")
+        return win
     }
 }
