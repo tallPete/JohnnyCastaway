@@ -143,14 +143,21 @@ final class ADSScheduler {
         }
     }
 
-    /// Composed output for the current frame.
+    /// Snapshot taken at the same point jc_reborn calls grUpdateDisplay —
+    /// after play() but before post-process (free / spawn). Returned by
+    /// `composedFramebuffer`. Without this snapshot, the displayed frame
+    /// would reflect the AFTER-post-process state, causing Johnny to
+    /// disappear for one frame between sub-scenes (thread A freed, thread
+    /// B not yet drawn). nil before the first tick — composedFramebuffer
+    /// falls back to a live composite then.
+    private var snapshotFramebuffer: Framebuffer?
+
+    /// Composite the current state into a fresh framebuffer.
+    /// Used both by the per-tick snapshot and by the live-composite
+    /// fallback before the first tick.
     /// Order: background → active TTM layers → holiday decoration.
     /// Includes any non-zero isRunning (matches jc_reborn graphics.c:196).
-    /// State 2 (terminated awaiting cleanup) MUST be included: a thread that
-    /// hits PURGE often sits in state 2 for many ticks while its timer
-    /// counts down to 0; filtering by ==1 made Johnny's last-drawn frame
-    /// vanish for ~3.5s between scenes (the "Johnny disappears" symptom).
-    var composedFramebuffer: Framebuffer {
+    private func composeFramebufferNow() -> Framebuffer {
         var dest = Framebuffer()
         let activeLayers = threads.filter { $0.isRunning != 0 }.map { $0.layer }
         graphics.composite(threadLayers: activeLayers, into: &dest)
@@ -158,6 +165,13 @@ final class ADSScheduler {
             dest.composite(layer: holiday)
         }
         return dest
+    }
+
+    /// Composed output for the current frame. Returns the per-tick
+    /// snapshot taken between play() and post-process, falling back to a
+    /// live composite if no snapshot has been taken yet.
+    var composedFramebuffer: Framebuffer {
+        snapshotFramebuffer ?? composeFramebufferNow()
     }
 
     // ---------------------------------------------------------------
@@ -312,23 +326,23 @@ final class ADSScheduler {
         let slotName = ttmSlots[Int(slot)].resourceName
         print("[thread] spawn idx=\(threadIdx) slot=\(slot)(\(slotName)) tag=\(tag) sceneTimer=\(freeThread.sceneTimer) iter=\(freeThread.sceneIterations) ip=\(freeThread.ip) (numThreads=\(numThreads))")
 
-        // Run the new thread's first play() now so its initial draws land
-        // in the framebuffer before scheduler.tick returns. Without this,
-        // there is a one-tick gap between the previous thread's free and
-        // the new thread's first draw — Johnny vanishes for a frame
-        // between sub-scenes (the "flicker" symptom).
+        // NOTE: do NOT immediately play() the new thread here.
         //
-        // jc_reborn doesn't need this because its grUpdateDisplay runs
-        // BEFORE post-process spawning (ads.c:691→729→760), so the previous
-        // thread's last draws are still on screen when triggers spawn the
-        // next thread. Our composedFramebuffer is captured AFTER the whole
-        // tick (post-process included), so we have to draw the new thread's
-        // first frame inline here.
-        freeThread.timer = freeThread.delay
-        TTMInterpreter.play(
-            thread: freeThread, graphics: graphics,
-            cache: cache, sound: sound
-        )
+        // We previously did this to mask a one-frame "flicker" gap between
+        // sub-scenes (Johnny disappearing for one frame between PURGE-and-
+        // free of thread A and the first draw of trigger-spawned thread B).
+        // But that immediate play interacted badly with chunk graphs that
+        // self-trigger: the new thread could hit PURGE → state 2 → cleanup
+        // in the SAME post-process pass, firing the next triggered chunk
+        // synchronously and accelerating the chunk-graph cycle so much that
+        // some scenes (e.g. STAND.ADS tag=5 cycling MJAMBWLK 41/43/44/65)
+        // never terminate naturally.
+        //
+        // jc_reborn matches our (post-revert) behaviour: spawn does NOT
+        // play; the new thread plays in the next scheduler.tick step (b).
+        // The proper fix for the flicker is to snapshot composedFramebuffer
+        // BEFORE post-process (matching jc_reborn's grUpdateDisplay timing),
+        // not to inject an immediate play.
     }
 
     // ---------------------------------------------------------------
@@ -570,6 +584,7 @@ final class ADSScheduler {
         for t in threads     { t.free() }
         numThreads        = 0
         stopRequested     = false
+        snapshotFramebuffer = nil   // discard prior scene's last snapshot
         // Note: graphics.dx/dy are NOT reset here. jc_reborn's adsPlay() leaves
         // them alone — the caller (story.c / Engine façade) is responsible for
         // setting them to the island offset (or zero for non-island scenes)
@@ -620,6 +635,18 @@ final class ADSScheduler {
                 cache: cache, sound: sound
             )
         }
+
+        // SNAPSHOT for display: capture the framebuffer state HERE, after
+        // play() but BEFORE post-process. This matches jc_reborn's
+        // grUpdateDisplay timing (ads.c:729 — display is taken before the
+        // post-process loop at ads.c:760+ frees state-2 threads and fires
+        // triggered chunks). Without this snapshot, our composedFramebuffer
+        // is captured AFTER post-process — by which point thread A has
+        // already been freed and thread B (its successor) hasn't drawn yet,
+        // producing a one-frame "Johnny vanishes" flicker between sub-
+        // scenes. With the snapshot, the displayed frame still shows
+        // thread A's last draws while triggers spawn B for the next tick.
+        snapshotFramebuffer = composeFramebufferNow()
 
         // (c) Compute mini across background + foreground timers (ads.c:732–747).
         // Iterate all non-zero isRunning states (including 2 = "terminated,
