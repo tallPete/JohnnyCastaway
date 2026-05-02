@@ -240,9 +240,6 @@ public final class StoryRunner {
                 state = .idle
                 return 0
             }
-            // Watchdog: count consecutive ticks where the scene has threads
-            // allocated but none are actively running. After 50 such ticks,
-            // dump the thread states so we can see why the scene is stuck.
             playingTicks += 1
             if playingTicks % 200 == 0 {
                 let states = scheduler.threads.enumerated()
@@ -250,6 +247,26 @@ public final class StoryRunner {
                     .map { "[\($0.offset)]=\($0.element.isRunning)" }
                     .joined(separator: " ")
                 print("[story] still playing \(n) tag=\(t) after \(playingTicks) ticks; threads: \(states); numThreads=\(scheduler.numThreads)")
+            }
+
+            // Per-scene watchdog timeout. Some ADS scripts (e.g. STAND.ADS
+            // tag=5 cycling MJAMBWLK tags 41/43/44/65) form a self-
+            // sustaining IF_LASTPLAYED chunk graph that never naturally
+            // terminates. The original DOS game appears to have cut these
+            // short via wall-clock pacing pressure that we don't reproduce.
+            // 8000 playingTicks is well past the longest legitimate scene
+            // (~3000 in observed runs), so anything beyond it is stuck.
+            // Force-kill all threads, mark scheduler finished, and let the
+            // story advance to the next scene on the following tick.
+            if playingTicks > 8000 {
+                print("[story] WATCHDOG: force-ending \(n) tag=\(t) after \(playingTicks) ticks (likely chunk-graph cycle)")
+                for thr in scheduler.threads where thr.isRunning != 0 {
+                    thr.free()
+                }
+                scheduler.numThreads = 0
+                // Don't recurse — fall through; next tick will see
+                // isFinished and advance to the next scene.
+                return 0
             }
             return scheduler.tick()
 
