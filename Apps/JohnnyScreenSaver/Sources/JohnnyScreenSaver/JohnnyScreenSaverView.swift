@@ -126,6 +126,20 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// Cached so we can unsubscribe in deinit (best-effort).
     private var didStopObserver: NSObjectProtocol? = nil
 
+    /// Wall-clock time of the last startAnimation; used to gate the
+    /// zombie check with a 3 s startup grace period (window occlusion
+    /// state can briefly read as not-visible during the first frames
+    /// before the layer is presented).
+    private var startupWallTime: CFTimeInterval = 0
+
+    /// Consecutive `animateOneFrame` calls in which our window has
+    /// reported as not-visible.  When this hits `zombieFramesThreshold`
+    /// (~3 s of confirmed invisibility), we treat the host as having
+    /// silently dismissed us and self-terminate.  Reset whenever the
+    /// window becomes visible again.
+    private var consecutiveZombieFrames: Int = 0
+    private let zombieFramesThreshold: Int = 90   // ~3 s at 30 Hz
+
     // ---------------------------------------------------------------
     // MARK: Init
     // ---------------------------------------------------------------
@@ -195,6 +209,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         NSLog("[Johnny] startAnimation: wasFullScreenAtStart=%d windowSize=%@",
               wasFullScreenAtStart ? 1 : 0,
               NSStringFromSize(window?.frame.size ?? .zero))
+
+        startupWallTime         = CACurrentMediaTime()
+        consecutiveZombieFrames = 0
 
         super.startAnimation()
         startupIfNeeded()
@@ -575,6 +592,41 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     public override func animateOneFrame() {
+        // Tahoe runaway-host detection.
+        //
+        // The system frequently fails to call stopAnimation /
+        // viewDidMoveToWindow(nil) when the user dismisses the screensaver.
+        // The animation timer keeps firing this method, ticking the engine
+        // and queueing audio in the background.  The only signals we can
+        // *trust* are ones we observe directly: our own window's visibility.
+        //
+        // If `occlusionState` reports not-visible for ~3 s straight (after
+        // a startup grace period), the user can't see us — we're a zombie.
+        // Silence audio immediately, skip further rendering, and (if we're
+        // running full-screen inside legacyScreenSaver) self-terminate.
+        let runtime = CACurrentMediaTime() - startupWallTime
+        if runtime > 3.0 {
+            let visibleNow: Bool = {
+                guard let w = window else { return false }
+                return w.occlusionState.contains(.visible)
+            }()
+            if !visibleNow {
+                consecutiveZombieFrames += 1
+                if consecutiveZombieFrames == zombieFramesThreshold {
+                    NSLog("[Johnny] zombie detected — window not visible for %d frames", zombieFramesThreshold)
+                    soundSink.stopAll()
+                    scheduleEmergencyExitIfNeeded(immediate: true)
+                }
+                if consecutiveZombieFrames >= zombieFramesThreshold {
+                    // Stop ticking the engine so we don't queue further
+                    // audio while the exit watchdog drains.
+                    return
+                }
+            } else {
+                consecutiveZombieFrames = 0
+            }
+        }
+
         guard let metalLayer = layer as? CAMetalLayer,
               let renderer   = renderer else { return }
 
@@ -643,7 +695,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     ///   • processName must contain "legacyScreenSaver"
     ///   • the most recent startAnimation must have been on a window
     ///     ≥ 800×600 (full-screen, not preview)
-    private func scheduleEmergencyExitIfNeeded() {
+    private func scheduleEmergencyExitIfNeeded(immediate: Bool = false) {
         guard Self.isInLegacyScreenSaver else { return }
         guard wasFullScreenAtStart else {
             NSLog("[Johnny] watchdog: skipped (not full-screen)")
@@ -661,8 +713,16 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             exit(0)
         }
         emergencyExitWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: work)
-        NSLog("[Johnny] watchdog: armed (8s) — will exit if no startAnimation")
+        // `immediate` (0.5 s) is used when the zombie check inside
+        // animateOneFrame has confirmed dismissal — we've already waited
+        // 3 s of confirmed invisibility, so just give teardown a beat to
+        // drain audio queues and then exit.
+        // Default (8 s) is used when stopAnimation fires — we leave room
+        // for a legitimate stop/start preview-pane cycle.
+        let delay: DispatchTimeInterval = immediate ? .milliseconds(500) : .seconds(8)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        NSLog("[Johnny] watchdog: armed (%@) — will exit if no startAnimation",
+              immediate ? "0.5s" : "8s")
     }
 
     // No deinit — JohnnyScreenSaverView is rarely deallocated on Tahoe
