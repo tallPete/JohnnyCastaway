@@ -128,6 +128,17 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
     // (Polling-based zombie detection was removed — see animateOneFrame.)
 
+    /// Our parent PID captured at init.  When the screensaver's host
+    /// process dies, the kernel reparents us to launchd (PID 1).  A
+    /// `getppid()` change is therefore a reliable, kernel-level signal
+    /// that we've been orphaned — unlike NSWindow.occlusionState, this
+    /// can't be lied to by the ViewBridge service architecture.
+    private var originalParentPID: pid_t = 1
+
+    /// Frame counter for the orphan poll (~1 s at 30 Hz).
+    private var orphanCheckCounter: Int = 0
+    private let orphanCheckInterval: Int = 30
+
     // ---------------------------------------------------------------
     // MARK: Init
     // ---------------------------------------------------------------
@@ -140,8 +151,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // which animateOneFrame() is called. We pace internally
         // anyway, so a high cadence (1/30 s) is fine.
         animationTimeInterval = 1.0 / 30.0
-        NSLog("[Johnny] init(frame:isPreview:) preview=%d process=%@",
-              isPreview ? 1 : 0, ProcessInfo.processInfo.processName)
+        originalParentPID = getppid()
+        NSLog("[Johnny] init(frame:isPreview:) preview=%d process=%@ parentPID=%d",
+              isPreview ? 1 : 0, ProcessInfo.processInfo.processName, originalParentPID)
         installDismissalObservers()
     }
 
@@ -149,7 +161,8 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         super.init(coder: coder)
         wantsLayer = true
         animationTimeInterval = 1.0 / 30.0
-        NSLog("[Johnny] init(coder:)")
+        originalParentPID = getppid()
+        NSLog("[Johnny] init(coder:) parentPID=%d", originalParentPID)
         installDismissalObservers()
     }
 
@@ -577,19 +590,36 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     public override func animateOneFrame() {
-        // NOTE: A previous build polled `window.occlusionState.contains(.visible)`
-        // here as a runaway-host signal.  That approach was abandoned because
-        // legacyScreenSaver hosts ScreenSaverView inside an
-        // NSViewServiceApplication (ViewBridge): the `window` we see is a
-        // service-side stand-in and its occlusionState is NOT synchronised
-        // with the actual on-screen window in the host process.  The check
-        // returned false even for the visibly-running full-screen saver,
-        // causing exit(0) every ~3 s of normal operation.
+        // Orphan detection.
         //
-        // We now rely solely on the stopAnimation watchdog +
-        // com.apple.screensaver.didstop distributed notification (see
-        // installDismissalObservers / scheduleEmergencyExitIfNeeded).  These
-        // are imperfect on Tahoe but never false-positive on a live saver.
+        // Tahoe sometimes leaks our process: the host that spawned us
+        // (System Settings preview pane, WallpaperLegacyExtension,
+        // loginwindow for full-screen, etc.) exits without telling us,
+        // and we keep ticking in the background reparented to launchd.
+        //
+        // The kernel-level signal is rock-solid: getppid() changes from
+        // our spawning host's PID to 1 (launchd) when our parent dies.
+        // We can't lie to ourselves about this the way the ViewBridge
+        // window can lie about occlusion state.  Polled once a second
+        // because syscalls are cheap.
+        //
+        // Gate by isInLegacyScreenSaver so this never runs in the
+        // configure sheet (which is hosted in System Settings, where
+        // a parent change would mean something else entirely).
+        orphanCheckCounter += 1
+        if orphanCheckCounter >= orphanCheckInterval {
+            orphanCheckCounter = 0
+            if Self.isInLegacyScreenSaver && originalParentPID > 1 {
+                let nowParent = getppid()
+                if nowParent != originalParentPID {
+                    NSLog("[Johnny] orphan detected: parent %d → %d (launchd) — exit(0)",
+                          originalParentPID, nowParent)
+                    soundSink.stopAll()
+                    teardown()
+                    exit(0)
+                }
+            }
+        }
 
         guard let metalLayer = layer as? CAMetalLayer,
               let renderer   = renderer else { return }
