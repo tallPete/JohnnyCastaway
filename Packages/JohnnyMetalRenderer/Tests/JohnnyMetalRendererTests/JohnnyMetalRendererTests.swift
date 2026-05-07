@@ -75,21 +75,32 @@ struct GameRectTests {
         }
     }
 
-    // MARK: 1080p — limited by height (2× scale)
+    // MARK: 1080p — fractional fill, height-limited
 
-    @Test("1920×1080: floor(min(3, 2.25)) = 2× with horizontal letterbox")
+    @Test("1920×1080: fractional 2.25× fills height, horizontal letterbox only")
     func hdResolution() {
-        // k = floor(min(1920/640, 1080/480)) = floor(min(3, 2.25)) = 2
-        // gw = 1280, gh = 960; ox = 320, oy = 60
+        // k = min(1920/640, 1080/480) = min(3.0, 2.25) = 2.25
+        // gw = 1440, gh = 1080; ox = 240, oy = 0
         let r = EngineRenderer.gameRect(for: CGSize(width: 1920, height: 1080))
-        let expLeft   = Float(320.0   / 1920.0 * 2.0 - 1.0)          // ≈ -0.667
-        let expRight  = Float(1600.0  / 1920.0 * 2.0 - 1.0)          // ≈  0.667
-        let expTop    = Float(1.0 - 60.0  / 1080.0 * 2.0)            // ≈  0.889
-        let expBottom = Float(1.0 - 1020.0 / 1080.0 * 2.0)           // ≈ -0.889
-        #expect(r.x ≈ expLeft,   "left (horizontal letterbox)")
-        #expect(r.z ≈ expRight,  "right")
-        #expect(r.y ≈ expTop,    "top (vertical letterbox)")
-        #expect(r.w ≈ expBottom, "bottom")
+        let expLeft   = Float(240.0  / 1920.0 * 2.0 - 1.0)   // -0.75
+        let expRight  = Float(1680.0 / 1920.0 * 2.0 - 1.0)   //  0.75
+        #expect(r.x ≈ expLeft,  "left (horizontal letterbox)")
+        #expect(r.z ≈ expRight, "right")
+        #expect(r.y ≈ 1.0, "no top margin — height fully used")
+        #expect(r.w ≈ -1.0, "no bottom margin — height fully used")
+    }
+
+    @Test("3840×2160 (4K): fractional 4.5× fills height edge-to-edge")
+    func uhd4KResolution() {
+        // k = min(3840/640, 2160/480) = min(6.0, 4.5) = 4.5
+        // gw = 2880, gh = 2160; ox = 480, oy = 0
+        let r = EngineRenderer.gameRect(for: CGSize(width: 3840, height: 2160))
+        let expLeft  = Float(480.0  / 3840.0 * 2.0 - 1.0)    // -0.75
+        let expRight = Float(3360.0 / 3840.0 * 2.0 - 1.0)    //  0.75
+        #expect(r.x ≈ expLeft,  "left (horizontal letterbox)")
+        #expect(r.z ≈ expRight, "right")
+        #expect(r.y ≈ 1.0,  "no top margin — height fully used")
+        #expect(r.w ≈ -1.0, "no bottom margin — height fully used")
     }
 
     // MARK: Horizontal letterbox (wide display, height limits scale)

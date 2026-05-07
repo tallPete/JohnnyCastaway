@@ -7,8 +7,10 @@
 //   2. Upload the engine's 640×480 indexed framebuffer to an R8Uint texture
 //      and its 16-entry palette to an RGBA8Unorm 16×1 texture.
 //   3. Render a single textured quad (via triangle strip) to a CAMetalDrawable,
-//      applying nearest-neighbour integer-scaled letterboxing via the
-//      `gameRect` uniform.
+//      applying nearest-neighbour fractional-scaled letterboxing via the
+//      `gameRect` uniform.  Fractional scale (rather than integer) is used so
+//      the game fills the available area on every monitor regardless of pixel
+//      dimensions — see `gameRect(for:)` for the trade-off discussion.
 //
 // Texture strategy:
 //   Both textures use MTLStorageModeShared (unified memory on Apple Silicon).
@@ -235,15 +237,25 @@ public final class EngineRenderer {
     /// Returns `SIMD4<Float>(left, top, right, bottom)` in Metal NDC
     /// (x ∈ [-1,1], y ∈ [-1,1] with +y upward).
     ///
-    /// Integer scale: `k = floor(min(W/640, H/480))`, minimum 1.
-    /// The game area is centred; the surrounding margin is cleared to black
-    /// by the render pass clear colour.
+    /// Scale: `k = min(W/640, H/480)`, fractional permitted so the
+    /// game fills the available area on every monitor regardless of
+    /// its pixel dimensions.  At non-integer scales the shader's
+    /// `texture.read()` introduces minor row/column unevenness (some
+    /// source pixels span N screen pixels, neighbours span N+1) — for
+    /// the cartoon content that's a worthwhile trade for a true
+    /// full-screen presentation.  Previously this floored to integer,
+    /// which left visible bars on every monitor whose height wasn't a
+    /// clean multiple of 480 (e.g. 88.9% fill on a 4K external).
+    /// The game area is centred; the surrounding margin is cleared to
+    /// black by the render pass clear colour.
     public static func gameRect(for drawableSize: CGSize) -> SIMD4<Float> {
         let dw = Double(drawableSize.width)
         let dh = Double(drawableSize.height)
 
-        // Integer scale, at least 1× so tiny windows still show something
-        let k  = max(1.0, floor(min(dw / 640.0, dh / 480.0)))
+        // Fractional scale that maxes-out the limiting axis.  Tiny
+        // drawables (< 640×480) shrink proportionally rather than
+        // overflowing the display.
+        let k  = min(dw / 640.0, dh / 480.0)
         let gw = 640.0 * k
         let gh = 480.0 * k
 
