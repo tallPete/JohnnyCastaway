@@ -58,18 +58,25 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
         NSLog("[Johnny] playSample(%d)", id)
     }
 
-    /// Stop all playback immediately.
+    /// Stop all playback immediately AND release the AVAudioPlayer
+    /// instances.
     ///
     /// AVAudioPlayer keeps audio buffered in the hardware pipeline and
-    /// continues playing even after its owning object is released.  This
-    /// must be called explicitly before the sink is torn down so that sound
-    /// does not bleed past screensaver dismissal.
+    /// continues playing even after its owning object is released by ARC.
+    /// Calling `stop()` halts the buffer, but the AudioQueue resources
+    /// only fully drain when the player is deallocated — and on Tahoe
+    /// the legacyScreenSaver host frequently leaks the saver view, which
+    /// means our players never get released by ARC and a stale `current`
+    /// reference can be re-played by a stray engine tick.  Dropping the
+    /// dictionary here forces immediate teardown of all audio queues.
     func stopAll() {
         current?.stop()
         current = nil
-        // Belt-and-suspenders: stop every loaded player so nothing
-        // continues if `current` was stale.
+        // Stop every loaded player first (in case any other reference
+        // is still holding one), then drop the strong references so
+        // the underlying AudioQueueObject is destroyed.
         players.values.forEach { $0.stop() }
-        NSLog("[Johnny] AVAudioPlayerSoundSink: stopAll")
+        players.removeAll()
+        NSLog("[Johnny] AVAudioPlayerSoundSink: stopAll (released %d player(s))", players.count)
     }
 }

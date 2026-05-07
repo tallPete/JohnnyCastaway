@@ -86,6 +86,46 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// (the preview pane can call startAnimation many times).
     private var didScheduleResourcePicker = false
 
+    // ---- Tahoe runaway-host defenses --------------------------------
+    //
+    // On macOS 14+ (and especially Tahoe), legacyScreenSaver routinely
+    // fails to terminate after the user dismisses the screensaver: the
+    // standard ScreenSaverView lifecycle callbacks (stopAnimation,
+    // viewDidMoveToWindow(nil), viewWillMove(toSuperview:nil)) often
+    // never fire.  The host process keeps ticking the engine in the
+    // background, AVAudioPlayer keeps queueing sounds, and CGEventTaps
+    // installed by AppKit can interfere with the user's mouse.
+    //
+    // We defend with two complementary mechanisms:
+    //
+    //  1. A distributed-notification subscription on
+    //     "com.apple.screensaver.didstop" — this fires on real
+    //     dismissal even when the view callbacks don't.
+    //
+    //  2. A watchdog DispatchWorkItem armed in stopAnimation that
+    //     calls exit(0) after 8s of no startAnimation, BUT only when
+    //     processName == "legacyScreenSaver" AND the view was full-
+    //     screen at last startAnimation.  System Settings preview
+    //     pauses fire stopAnimation too, so a naive watchdog would
+    //     kill the preview process.
+
+    private static let isInLegacyScreenSaver: Bool = {
+        ProcessInfo.processInfo.processName.lowercased().contains("legacyscreensaver")
+    }()
+
+    /// True if the most recent startAnimation was on a full-screen sized
+    /// window.  Gates the exit watchdog so System Settings preview is never
+    /// killed (preview windows are typically <800px wide).
+    private var wasFullScreenAtStart: Bool = false
+
+    /// Pending watchdog that calls exit(0) if the host doesn't terminate
+    /// us within a reasonable window after dismissal.  Cancelled by the
+    /// next startAnimation() call.
+    private var emergencyExitWork: DispatchWorkItem? = nil
+
+    /// Cached so we can unsubscribe in deinit (best-effort).
+    private var didStopObserver: NSObjectProtocol? = nil
+
     // ---------------------------------------------------------------
     // MARK: Init
     // ---------------------------------------------------------------
@@ -98,7 +138,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // which animateOneFrame() is called. We pace internally
         // anyway, so a high cadence (1/30 s) is fine.
         animationTimeInterval = 1.0 / 30.0
-        NSLog("[Johnny] init(frame:isPreview:) preview=%d", isPreview ? 1 : 0)
+        NSLog("[Johnny] init(frame:isPreview:) preview=%d process=%@",
+              isPreview ? 1 : 0, ProcessInfo.processInfo.processName)
+        installDismissalObservers()
     }
 
     public required init?(coder: NSCoder) {
@@ -106,6 +148,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         wantsLayer = true
         animationTimeInterval = 1.0 / 30.0
         NSLog("[Johnny] init(coder:)")
+        installDismissalObservers()
     }
 
     // ---------------------------------------------------------------
@@ -133,6 +176,26 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     public override func startAnimation() {
+        // Cancel any pending emergency-exit watchdog from a prior
+        // stopAnimation — System Settings preview pauses fire
+        // start/stop pairs in rapid succession, and we don't want the
+        // watchdog to kill us during one of those cycles.
+        emergencyExitWork?.cancel()
+        emergencyExitWork = nil
+
+        // Capture window size to gate the exit watchdog: only kill the
+        // process if we WERE running full-screen.  Preview windows are
+        // small (typically < 800 px wide) and Settings keeps them
+        // installed for as long as the panel is open.
+        if let w = window {
+            wasFullScreenAtStart = (w.frame.width >= 800 && w.frame.height >= 600)
+        } else {
+            wasFullScreenAtStart = false
+        }
+        NSLog("[Johnny] startAnimation: wasFullScreenAtStart=%d windowSize=%@",
+              wasFullScreenAtStart ? 1 : 0,
+              NSStringFromSize(window?.frame.size ?? .zero))
+
         super.startAnimation()
         startupIfNeeded()
 
@@ -180,6 +243,10 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // screensaver — even if the view-removal callbacks lag.
         soundSink.stopAll()
         NSLog("[Johnny] stopAnimation: audio silenced")
+
+        // Arm the runaway-host watchdog (gated by process name and
+        // full-screen mode — see scheduleEmergencyExitIfNeeded).
+        scheduleEmergencyExitIfNeeded()
     }
 
     public override func viewDidMoveToWindow() {
@@ -482,6 +549,13 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
               { switch loadState { case .notLoaded: return "notLoaded"
                                    case .loaded:    return "loaded"
                                    case .error(let e): return "error(\(e))" } }())
+        // Detach Metal *before* releasing the renderer so the GPU
+        // command queue drains.  Without this, CAMetalLayer keeps
+        // submitting frames in the background even after our
+        // EngineRenderer is gone.
+        if let metalLayer = layer as? CAMetalLayer {
+            metalLayer.device = nil
+        }
         renderer    = nil
         storyRunner = nil
         soundSink.stopAll()             // halt in-flight audio before releasing
@@ -537,6 +611,65 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // Update the debug HUD (cheap; only allocates a string once per frame).
         if debugOverlay != nil { updateDebugOverlay() }
     }
+
+    // ---------------------------------------------------------------
+    // MARK: Tahoe runaway-host defenses
+    // ---------------------------------------------------------------
+
+    /// Subscribe to the distributed notification the system posts when a
+    /// screensaver session ends.  Reliable on Tahoe even when the
+    /// ScreenSaverView callbacks (stopAnimation / viewDidMoveToWindow)
+    /// don't fire.  Idempotent — only attaches once per instance.
+    private func installDismissalObservers() {
+        guard didStopObserver == nil else { return }
+        didStopObserver = DistributedNotificationCenter.default().addObserver(
+            forName:   NSNotification.Name("com.apple.screensaver.didstop"),
+            object:    nil,
+            queue:     .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            NSLog("[Johnny] received com.apple.screensaver.didstop")
+            self.teardown()
+            self.scheduleEmergencyExitIfNeeded()
+        }
+    }
+
+    /// Arm a one-shot watchdog: if we're still alive in 8 s and no
+    /// startAnimation has cancelled it, the host has leaked us — call
+    /// exit(0) so audio/CPU stop and the user's mouse works again.
+    ///
+    /// Strict gating prevents accidental termination of the System
+    /// Settings preview process:
+    ///   • processName must contain "legacyScreenSaver"
+    ///   • the most recent startAnimation must have been on a window
+    ///     ≥ 800×600 (full-screen, not preview)
+    private func scheduleEmergencyExitIfNeeded() {
+        guard Self.isInLegacyScreenSaver else { return }
+        guard wasFullScreenAtStart else {
+            NSLog("[Johnny] watchdog: skipped (not full-screen)")
+            return
+        }
+        emergencyExitWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            NSLog("[Johnny] watchdog: forcing exit(0) — host failed to terminate")
+            // Best-effort final teardown so any in-flight audio is killed
+            // before exit() pulls the rug.
+            self?.teardown()
+            // CFRunLoopStop won't help — the runloop will just be re-entered.
+            // exit(0) is the only reliable termination from inside a leaked
+            // legacyScreenSaver host.
+            exit(0)
+        }
+        emergencyExitWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: work)
+        NSLog("[Johnny] watchdog: armed (8s) — will exit if no startAnimation")
+    }
+
+    // No deinit — JohnnyScreenSaverView is rarely deallocated on Tahoe
+    // (legacyScreenSaver leaks the view), and the distributed-notification
+    // observer captures `self` weakly so a stale self is harmless.  The
+    // host process eventually dying (either naturally or via our exit
+    // watchdog) reclaims everything.
 
     // ---------------------------------------------------------------
     // MARK: Debug overlay (HUD)
