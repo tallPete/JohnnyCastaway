@@ -220,13 +220,26 @@ public final class GraphicsState: @unchecked Sendable {
 
     /// Blit sprite (spriteNo, imageNo) at (x, y) from a loaded Bitmap.
     /// Translates grDrawSprite() in graphics.c:456–469.
+    ///
+    /// `imageNo` is the BMP-slot index that was already used by the caller
+    /// to pick `bitmap`; we accept it for parity with the bytecode but the
+    /// only real validation is that `spriteNo` is in range for the bitmap's
+    /// sprite-frame count.  An earlier version checked
+    /// `imageNo < bitmap.imageCount`, which is a category error: imageNo is
+    /// a slot index (0–5), bitmap.imageCount is the number of sprite frames
+    /// packed into the bitmap.  When the two coincided (small imageNo, many
+    /// frames) the guard happened to pass; when a bitmap with few frames
+    /// was loaded into a high-numbered slot, all draws silently dropped
+    /// (symptom: missing sleep-Z animation, missing fire frames).  Matches
+    /// jc_reborn graphics.c:457 (`spriteNo >= numSprites[imageNo]`) and
+    /// Go port graphics.go:476.
     func drawSprite(
         on layer: inout Framebuffer,
         bitmap: Bitmap,
         x inX: Int, y inY: Int,
         spriteNo: Int, imageNo: Int
     ) {
-        guard imageNo < bitmap.imageCount, spriteNo < bitmap.imageCount else { return }
+        guard spriteNo >= 0, spriteNo < bitmap.imageCount else { return }
         let bx = inX + dx
         let by = inY + dy
         let w  = Int(bitmap.widths[spriteNo])
@@ -248,13 +261,14 @@ public final class GraphicsState: @unchecked Sendable {
 
     /// Blit sprite horizontally flipped at (x, y).
     /// Translates grDrawSpriteFlip() in graphics.c:472–491.
+    /// See drawSprite(...) for the imageNo / spriteNo guard rationale.
     func drawSpriteFlip(
         on layer: inout Framebuffer,
         bitmap: Bitmap,
         x inX: Int, y inY: Int,
         spriteNo: Int, imageNo: Int
     ) {
-        guard imageNo < bitmap.imageCount, spriteNo < bitmap.imageCount else { return }
+        guard spriteNo >= 0, spriteNo < bitmap.imageCount else { return }
         let w  = Int(bitmap.widths[spriteNo])
         let h  = Int(bitmap.heights[spriteNo])
         // flip: x coordinate starts at right edge (x + w - 1), column 0 lands there

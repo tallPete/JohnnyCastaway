@@ -29,7 +29,9 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
     private(set) var lastSampleID: Int? = nil
 
     /// Eagerly load all present sound files from `folder` so that
-    /// `playSample()` never blocks on I/O.
+    /// `playSample()` never blocks on I/O.  We also enable AVAudioPlayer's
+    /// rate manipulation here so per-playback pitch shifts (matching the
+    /// Go port's stylistic ±25% randomisation) are cheap.
     init(folder: URL) {
         for id in 0 ... 24 {
             let url = folder.appendingPathComponent("sound\(id).wav")
@@ -37,6 +39,7 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
                 // Missing files (sound11, sound13, …) are normal — skip silently.
                 continue
             }
+            player.enableRate = true   // required before setting `rate`
             player.prepareToPlay()
             players[id] = player
         }
@@ -52,10 +55,16 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
         }
         current?.stop()
         player.currentTime = 0
+        // Random pitch shift in [0.75, 1.25] — matches the Go port's
+        // soundPlay() (sound.go:72–73) which adds variety to repeated
+        // samples.  jc_reborn (the C reference) plays at native rate;
+        // we follow the Go port because it noticeably improves the feel
+        // of often-repeated sounds (hammering, fishing, sleep snores).
+        player.rate = Float.random(in: 0.75 ... 1.25)
         player.play()
         current = player
         lastSampleID = id
-        NSLog("[Johnny] playSample(%d)", id)
+        NSLog("[Johnny] playSample(%d) rate=%.2f", id, player.rate)
     }
 
     /// Stop all playback immediately AND release the AVAudioPlayer
