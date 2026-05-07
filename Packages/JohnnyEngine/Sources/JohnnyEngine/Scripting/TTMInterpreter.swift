@@ -41,7 +41,17 @@ enum TTMInterpreter {
         cache: ResourceCache,
         sound: SoundSink
     ) {
-        guard let slot = thread.ttmSlot, slot.isLoaded else { return }
+        guard let slot = thread.ttmSlot, slot.isLoaded else {
+            // Log unexpected play() on a thread with no/unloaded TTM slot.
+            // The walk thread (ttmSlot == nil) should never reach play() because
+            // scheduler.tick() is only called from .playingScene, and walks run in
+            // .walking. Seeing this log means a nil-slot thread leaked into
+            // scheduler.threads while the scene is active — the upstream cause
+            // will appear in nearby [ads] beginADS or [walk] logs.
+            let slotDesc = thread.ttmSlot.map { "slot=\($0.resourceName.isEmpty ? "(empty)" : $0.resourceName) isLoaded=\($0.isLoaded)" } ?? "ttmSlot=nil"
+            print("[ttm] WARN play() skipped — \(slotDesc) tag=\(thread.sceneTag) ip=\(thread.ip) isRunning=\(thread.isRunning)")
+            return
+        }
         let data = slot.bytecode
 
         var offset = thread.ip
@@ -50,7 +60,7 @@ enum TTMInterpreter {
         while continueLoop {
             guard offset + 1 < data.count else {
                 // Ran off the end of bytecode → mark done
-                print("[ttm] thread done (end of bytecode) slot=\(slot.resourceName) tag=\(thread.sceneTag) at_ip=\(offset)")
+                print("[ttm] thread done (EOF) slot=\(slot.resourceName) tag=\(thread.sceneTag) ip=\(offset) bytecodeLen=\(data.count)")
                 thread.isRunning = 2
                 continueLoop = false
                 break
@@ -98,10 +108,19 @@ enum TTMInterpreter {
                 // Loop if sceneTimer > 0, else mark done. Does NOT stop
                 // the interpret loop. (ttm.c:189–195)
                 if thread.sceneTimer > 0 {
-                    thread.nextGotoOffset =
-                        slot.findPreviousTagOffset(before: offset)
+                    let jumpTo = slot.findPreviousTagOffset(before: offset)
+                    if jumpTo == 0 {
+                        // No tag exists before the PURGE — loop-back will be
+                        // suppressed by the `nextGotoOffset != 0` guard in
+                        // post-process. jc_reborn would jump to ip=0 here;
+                        // our nextGotoOffset scheme treats 0 as "no jump".
+                        // This is usually benign (thread runs forward to EOF),
+                        // but log it so we know it happened.
+                        print("[ttm] PURGE loop-back: no prior tag found before ip=\(offset) in slot=\(slot.resourceName) tag=\(thread.sceneTag) — will play through to EOF instead of looping")
+                    }
+                    thread.nextGotoOffset = jumpTo
                 } else {
-                    print("[ttm] thread done (PURGE, no sceneTimer) slot=\(slot.resourceName) tag=\(thread.sceneTag) at_ip=\(offset)")
+                    print("[ttm] thread done (PURGE/sceneTimer=0) slot=\(slot.resourceName) tag=\(thread.sceneTag) at_ip=\(offset)")
                     thread.isRunning = 2
                 }
 

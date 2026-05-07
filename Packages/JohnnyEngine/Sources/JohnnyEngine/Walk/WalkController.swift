@@ -140,8 +140,14 @@ public class WalkController {
                 // Turn is complete
                 if currentSpot != finalSpot {
                     // Begin walking forward to nextSpot
+                    let wasBehind = isBehindTree
                     isBehindTree = (currentSpot == Spot.D && nextSpot == Spot.E)
                                || (currentSpot == Spot.E && nextSpot == Spot.D)
+                    if isBehindTree && !wasBehind {
+                        print("[walk] isBehindTree SET: currentSpot=\(currentSpot) nextSpot=\(nextSpot)")
+                    } else if !isBehindTree && wasBehind {
+                        print("[walk] isBehindTree CLEARED: currentSpot=\(currentSpot) nextSpot=\(nextSpot)")
+                    }
                     nextHdg  = -1
                     dataIndex = walkDataBookmarks[currentSpot][nextSpot]
                 } else {
@@ -201,10 +207,16 @@ public class WalkController {
             }
         }
 
-        // Behind-tree overlay (D↔E path)
+        // Behind-tree overlay (D↔E path).
+        // Draw trunk and leaves from BACKGRND.BMP onto the walk layer AFTER
+        // Johnny — same as jc_reborn walk.c:164–167. This makes trunk/leaves
+        // appear in front of Johnny on the walk layer, which is composited on
+        // top of the background (which already contains trunk+leaves baked in).
+        // Net result: palm tree appears in front of Johnny. ✓
+        // Coordinates match jc_reborn walk.c:165-166 exactly.
         if isBehindTree {
-            graphics.drawSprite(on: &layer, bitmap: bgBmp, x: 441, y: 148, spriteNo: 13, imageNo: 0)  // trunk
-            graphics.drawSprite(on: &layer, bitmap: bgBmp, x: 364, y: 122, spriteNo: 12, imageNo: 0)  // leafs
+            graphics.drawSprite(on: &layer, bitmap: bgBmp, x: 442, y: 148, spriteNo: 13, imageNo: 0)  // trunk
+            graphics.drawSprite(on: &layer, bitmap: bgBmp, x: 365, y: 122, spriteNo: 12, imageNo: 0)  // leafs
         }
 
         return hasArrived ? 80 : 6

@@ -174,6 +174,17 @@ final class ADSScheduler {
         snapshotFramebuffer ?? composeFramebufferNow()
     }
 
+    /// Refresh the snapshot from the current live state. Called by
+    /// StoryRunner during .walking ticks (which bypass scheduler.tick()
+    /// entirely) so the walker's drawings on walkThread.layer are
+    /// actually visible. Without this, the snapshot taken at the end of
+    /// the previous .playingScene tick stays on screen for the entire
+    /// walk duration — the user sees the previous scene's last frame
+    /// frozen while Johnny "teleports" to the next scene's start spot.
+    func refreshSnapshot() {
+        snapshotFramebuffer = composeFramebufferNow()
+    }
+
     // ---------------------------------------------------------------
     // MARK: Setup — adsLoad() translation, ads.c:89–190
     // ---------------------------------------------------------------
@@ -306,11 +317,23 @@ final class ADSScheduler {
         freeThread.bgColor         = 0x0F
         freeThread.layer           = GraphicsState.newLayer()
 
+        // Resolve slot name up front (used in both the findTag warning and the spawn log).
+        let slotName = ttmSlots[Int(slot)].resourceName
+
         // Find start offset
         if slot == 0 {
             freeThread.ip = 0
         } else {
-            freeThread.ip = ttmSlots[Int(slot)].findTag(tag) ?? 0
+            if let ip = ttmSlots[Int(slot)].findTag(tag) {
+                freeThread.ip = ip
+            } else {
+                // Tag not found in the TTM — IP falls back to 0 (start of
+                // bytecode). This is jc_reborn-compatible (ttmFindTag returns 0
+                // when not found), but it means the thread will execute whatever
+                // bytecode happens to be at offset 0, which is rarely correct.
+                print("[ttm] WARN adsAddScene: tag \(tag) not found in slot \(slot)(\(slotName)) — falling back to ip=0 (bytecodeLen=\(ttmSlots[Int(slot)].bytecode.count))")
+                freeThread.ip = 0
+            }
         }
 
         // Interpret arg3 as signed: negative = timer, positive = repeat count
@@ -323,7 +346,6 @@ final class ADSScheduler {
 
         numThreads += 1
         let threadIdx = threads.firstIndex(where: { $0 === freeThread }) ?? -1
-        let slotName = ttmSlots[Int(slot)].resourceName
         print("[thread] spawn idx=\(threadIdx) slot=\(slot)(\(slotName)) tag=\(tag) sceneTimer=\(freeThread.sceneTimer) iter=\(freeThread.sceneIterations) ip=\(freeThread.ip) (numThreads=\(numThreads))")
 
         // NOTE: do NOT immediately play() the new thread here.
@@ -579,6 +601,19 @@ final class ADSScheduler {
     // ---------------------------------------------------------------
 
     func beginADS(script: ADSScript, tag: UInt16) throws {
+        // Diagnostic: log any threads still running at reset time.
+        // Normally all threads should be free (isRunning=0) before beginADS
+        // is called — the scene completed (numThreads→0) and the walk thread
+        // was freed before state transitioned to .idle. Seeing this log means
+        // a thread survived the scene boundary unexpectedly.
+        let liveAtReset = threads.enumerated().filter { $0.element.isRunning != 0 }
+        if !liveAtReset.isEmpty {
+            let desc = liveAtReset.map { e in
+                "idx=\(e.offset) isRunning=\(e.element.isRunning) slot=\(e.element.ttmSlot?.resourceName ?? "nil") tag=\(e.element.sceneTag)"
+            }.joined(separator: ", ")
+            print("[ads] beginADS tag=\(tag): resetting \(liveAtReset.count) live thread(s): \(desc)")
+        }
+
         // Reset state
         for slot in ttmSlots { slot.reset() }
         for t in threads     { t.free() }
@@ -621,6 +656,26 @@ final class ADSScheduler {
     /// Returns the number of ticks to sleep (mini).
     @discardableResult
     func tick() -> Int {
+        // (0) PRE-TICK SWEEP — catch leaked walk threads BEFORE any of the
+        // ads.c logic runs. A walk thread (claimed by StoryRunner.startWalk)
+        // has isRunning=1 but ttmSlot=nil; if one of these survives into a
+        // scheduler.tick() call (which only happens in .playingScene state),
+        // it's an Issue 1 leak. The play() loop in step (b) only iterates
+        // `t.timer == 0` threads, so a leaked walk thread with timer>0 (after
+        // step c decrements) would persist for an extra tick. Sweeping here
+        // is timer-independent and resolves the freeze in the SAME tick the
+        // leak is detected, regardless of how the leak happened.
+        //
+        // Diagnostic: log the leak so we can correlate with surrounding
+        // [walk]/[thread]/[story] events and pinpoint the root cause.
+        for t in threads where t.isRunning == 1 && (t.ttmSlot == nil || t.ttmSlot?.isLoaded == false) {
+            let idx = threads.firstIndex(where: { $0 === t }) ?? -1
+            let slotDesc = t.ttmSlot.map { "\($0.resourceName.isEmpty ? "(empty)" : $0.resourceName) isLoaded=\($0.isLoaded)" } ?? "nil"
+            print("[ads] WARN: pre-tick sweep freeing leaked nil/unloaded-slot thread idx=\(idx) slot=\(slotDesc) tag=\(t.sceneTag) timer=\(t.timer) delay=\(t.delay) (numThreads before=\(numThreads))")
+            t.free()
+            numThreads = max(0, numThreads - 1)
+        }
+
         // (a) Advance background thread (island wave animation, ads.c:685–689)
         if backgroundThread.isRunning != 0 && backgroundThread.timer == 0 {
             backgroundThread.timer = backgroundThread.delay
@@ -697,7 +752,12 @@ final class ADSScheduler {
                     print("[thread] requeue idx=\(idx) slot=\(slotName) tag=\(t.sceneTag) iterRemaining=\(t.sceneIterations - 1)")
                     t.sceneIterations -= 1
                     t.isRunning = 1
-                    t.ip = ttmSlots[Int(t.sceneSlot)].findTag(t.sceneTag) ?? 0
+                    if let ip = ttmSlots[Int(t.sceneSlot)].findTag(t.sceneTag) {
+                        t.ip = ip
+                    } else {
+                        print("[ttm] WARN requeue: tag \(t.sceneTag) not found in slot \(slotName) — falling back to ip=0")
+                        t.ip = 0
+                    }
                     // No layer clear here — match jc_reborn. The stacked-
                     // sprite trails this was added to fix were actually
                     // caused by the (now-fixed) tag scanner and DRAW_SPRITE

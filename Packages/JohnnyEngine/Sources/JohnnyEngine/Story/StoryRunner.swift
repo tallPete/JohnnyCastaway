@@ -82,6 +82,15 @@ public final class StoryRunner {
     private var state: StoryState = .idle
     private var playingTicks: Int = 0
 
+    /// Mini-ticks remaining from the previous walker frame's returned delay.
+    /// When >0, the next .walking tick pauses (ticking only the wave/background
+    /// thread) instead of advancing the walker. Prevents the renderer from
+    /// sleeping for the full walker delay (e.g. 80 mini-ticks for an "arrived
+    /// hold" frame = 1.6s) — without this, the wave animation freezes for the
+    /// duration of the hold, and the debug overlay's currentTick stays put.
+    /// Reset to 0 whenever a new walk starts (in startWalk).
+    private var walkHoldRemaining: Int = 0
+
     // ---------------------------------------------------------------
     // MARK: Exposed palette
     // ---------------------------------------------------------------
@@ -202,33 +211,111 @@ public final class StoryRunner {
             return 0
 
         case .walking(let walker, let walkBmp, let bgBmp):
+            // -----------------------------------------------------------
+            // Pacing: the walker can return delays as large as 80 mini-ticks
+            // (the "arrived hold" frame). The renderer pacing
+            // (JohnnyMetalView: lastMini = max(4, mini*20) ms) would then
+            // skip frame-provider calls for 1.6 seconds, freezing the wave
+            // animation AND the debug overlay's tick counter for that whole
+            // period — the user perceives this as a freeze (Issue 1 root
+            // cause).
+            //
+            // jc_reborn avoids this because its scheduler.tick computes
+            // mini = min(walk_delay, background.delay=8) and the wave thread
+            // ticks every 8 mini-ticks regardless of walker delay. We
+            // recreate that here: cap each returned mini to the background
+            // thread's delay (typically 8) and stash any leftover walker
+            // delay in `walkHoldRemaining` for subsequent ticks. The walker
+            // is only re-advanced once `walkHoldRemaining` reaches 0.
+            //
+            // This also fixes a separate bug in the previous implementation:
+            // backgroundThread.timer was decremented by exactly 1 per call
+            // regardless of how many mini-ticks the renderer was actually
+            // sleeping — meaning waves drifted out of sync with wall-clock
+            // time during walks. The new code decrements by `step`, matching
+            // what the renderer will sleep for.
+            // -----------------------------------------------------------
+
+            let bgDelay = scheduler.backgroundThread.delay   // typically 8
+            let bgRunning = scheduler.backgroundThread.isRunning != 0
+
+            // Helper: tick the wave/background thread by `step` mini-ticks.
+            // Mirrors scheduler.tick() steps (a) + (c'/d) for backgroundThread
+            // but at the .walking cadence.
+            func tickBackground(by step: Int) {
+                guard bgRunning else { return }
+                scheduler.backgroundThread.timer = max(scheduler.backgroundThread.timer - step, 0)
+                if scheduler.backgroundThread.timer == 0 {
+                    scheduler.backgroundThread.timer = bgDelay
+                    scheduler.onBackgroundTick?()
+                }
+            }
+
+            // ----- Case A: still draining a previous walker frame's hold -----
+            if walkHoldRemaining > 0 {
+                let step = min(walkHoldRemaining, bgRunning ? bgDelay : walkHoldRemaining)
+                tickBackground(by: step)
+                walkHoldRemaining -= step
+                // Refresh the displayed frame: waves may have just animated
+                // (changing the background), and we need composedFramebuffer
+                // to reflect the live state, not a stale snapshot from the
+                // last .playingScene tick.
+                scheduler.refreshSnapshot()
+                return step
+            }
+
+            // ----- Case B: time to advance the walker one frame -----
+
             // The walk thread is claimed in startWalk(); look it up here.
             // Framebuffer is a value type, so we copy → mutate → write back.
             guard let walkThread = scheduler.threads.first(where: { $0.isRunning == 1 }) else {
                 // Lost the walk thread (shouldn't happen). Bail to .idle so
                 // we don't deadlock; the next tick will replan.
-                print("[story] walk thread missing, bailing to idle")
+                print("[story] walk thread missing — bailing to idle (numThreads=\(scheduler.numThreads))")
                 state = .idle
+                walkHoldRemaining = 0
                 return 0
             }
             var layer = walkThread.layer
             let delay = walker.animate(onto: &layer, walkBmp: walkBmp,
                                        bgBmp: bgBmp, graphics: graphics)
             walkThread.layer = layer
-            // Tick background/holiday (wave animation)
-            scheduler.backgroundThread.timer = max(scheduler.backgroundThread.timer - 1, 0)
-            if scheduler.backgroundThread.timer == 0 && scheduler.backgroundThread.isRunning != 0 {
-                scheduler.backgroundThread.timer = scheduler.backgroundThread.delay
-                scheduler.onBackgroundTick?()
-            }
+
             if delay == 0 {
                 let walkIdx = scheduler.threads.firstIndex(where: { $0 === walkThread }) ?? -1
-                print("[walk] done, freeing thread idx=\(walkIdx)")
+                print("[walk] done, freeing thread idx=\(walkIdx) (numThreads \(scheduler.numThreads) → \(max(0, scheduler.numThreads - 1)))")
                 walkThread.free()
                 scheduler.numThreads = max(0, scheduler.numThreads - 1)
+                // Sanity check: after freeing the walk thread, there should be
+                // no other isRunning≠0 threads left (the scene finished before
+                // the walk started). If there are, log them — they will be
+                // freed by the next beginADS call, but their presence here is
+                // suspicious and is the likely source of the walk-thread-leak
+                // freeze (Issue 1).
+                let residual = scheduler.threads.enumerated().filter { $0.element.isRunning != 0 }
+                if !residual.isEmpty {
+                    let desc = residual.map { "idx=\($0.offset) isRunning=\($0.element.isRunning) slot=\($0.element.ttmSlot?.resourceName ?? "nil") tag=\($0.element.sceneTag)" }.joined(separator: ", ")
+                    print("[walk] WARN: residual threads after walk completion: \(desc)")
+                }
                 state = .idle
+                walkHoldRemaining = 0
+                return 0
             }
-            return delay
+
+            // Cap the returned mini to the background's delay so the wave
+            // animation gets a chance to tick at its natural cadence even
+            // during a long "arrived hold" (delay=80) frame.
+            let step = bgRunning ? min(delay, bgDelay) : delay
+            tickBackground(by: step)
+            walkHoldRemaining = delay - step
+            // Refresh the displayed frame: walker.animate just drew a new
+            // walking pose to walkThread.layer, and wave animation may have
+            // updated the background. Without this, composedFramebuffer
+            // returns the stale snapshot taken at the end of the previous
+            // .playingScene tick — Johnny's walk animation is invisible
+            // and he appears to "pop" from one scene's spot to the next.
+            scheduler.refreshSnapshot()
+            return step
 
         case .playingScene(let n, let t):
             if scheduler.isFinished {
@@ -432,6 +519,27 @@ public final class StoryRunner {
         to:   Int, toHdg:   Int,
         rng:  inout some RandomNumberGenerator
     ) throws {
+        // Defensive: at this point we're in .idle transitioning to .walking.
+        // The previous scene should have completed (numThreads==0) and the
+        // previous walk (if any) should have freed its thread. If anything
+        // is still alive in the pool, it's a leak from an unknown path
+        // (Issue 1) — log it loudly with full state so we can pinpoint the
+        // source, then clean it up before claiming the new walk thread.
+        // Without this cleanup, the leaked thread would survive into the
+        // next .playingScene where it would freeze the engine until the
+        // ADSScheduler's pre-tick sweep frees it.
+        let stragglers = scheduler.threads.enumerated().filter { $0.element.isRunning != 0 }
+        if !stragglers.isEmpty {
+            let desc = stragglers.map { e in
+                "idx=\(e.offset) isRunning=\(e.element.isRunning) slot=\(e.element.ttmSlot?.resourceName ?? "nil") tag=\(e.element.sceneTag) ip=\(e.element.ip) timer=\(e.element.timer)"
+            }.joined(separator: ", ")
+            print("[story] WARN startWalk: \(stragglers.count) straggler thread(s) found before claiming walk thread — freeing them. State: \(desc)")
+            for e in stragglers {
+                e.element.free()
+                scheduler.numThreads = max(0, scheduler.numThreads - 1)
+            }
+        }
+
         let path     = calcPath(from: from, to: to, rng: &rng)
         let walkBmp  = try cache.bitmap(named: "JOHNWALK.BMP")
         let bgBmp: Bitmap
@@ -461,6 +569,7 @@ public final class StoryRunner {
         graphics.dx = islandState.xPos
         graphics.dy = islandState.yPos
 
+        walkHoldRemaining = 0   // fresh walk; no inherited hold from a prior one
         state = .walking(walkCtrl, walkBmp: walkBmp, bgBmp: bgBmp)
     }
 }
