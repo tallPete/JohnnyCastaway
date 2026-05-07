@@ -24,6 +24,10 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
     private var players: [Int: AVAudioPlayer] = [:]
     private weak var current: AVAudioPlayer?
 
+    /// Most recent sample ID passed to `playSample`, for the debug overlay.
+    /// Single-thread (main run loop), so plain `var` is fine.
+    private(set) var lastSampleID: Int? = nil
+
     /// Eagerly load all present sound files from `folder` so that
     /// `playSample()` never blocks on I/O.
     init(folder: URL) {
@@ -50,6 +54,22 @@ final class AVAudioPlayerSoundSink: SoundSink, @unchecked Sendable {
         player.currentTime = 0
         player.play()
         current = player
+        lastSampleID = id
         NSLog("[Johnny] playSample(%d)", id)
+    }
+
+    /// Stop all playback immediately.
+    ///
+    /// AVAudioPlayer keeps audio buffered in the hardware pipeline and
+    /// continues playing even after its owning object is released.  This
+    /// must be called explicitly before the sink is torn down so that sound
+    /// does not bleed past screensaver dismissal.
+    func stopAll() {
+        current?.stop()
+        current = nil
+        // Belt-and-suspenders: stop every loaded player so nothing
+        // continues if `current` was stale.
+        players.values.forEach { $0.stop() }
+        NSLog("[Johnny] AVAudioPlayerSoundSink: stopAll")
     }
 }

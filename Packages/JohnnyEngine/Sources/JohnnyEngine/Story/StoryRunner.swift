@@ -140,6 +140,17 @@ public final class StoryRunner {
     }
 
     // ---------------------------------------------------------------
+    // MARK: Story-day override (Phase 6 settings sheet)
+    // ---------------------------------------------------------------
+
+    /// When non-nil, `beginNextSequence` uses this day instead of the
+    /// value computed by `SceneScheduler.advanceDay(...)`. Useful for the
+    /// screensaver's "Story day" override and for QA scenarios that need
+    /// to reproduce a specific day's scenes deterministically.
+    /// Setting nil restores normal calendar-driven day advancement.
+    public var forceStoryDay: Int? = nil
+
+    // ---------------------------------------------------------------
     // MARK: Public interface
     // ---------------------------------------------------------------
 
@@ -172,11 +183,17 @@ public final class StoryRunner {
         // Advance story day if calendar day changed (story.c:65–91)
         let now          = dateProvider.currentDate
         let calDay       = SceneScheduler.dayOfYear(from: now)
-        storyDay         = SceneScheduler.advanceDay(
-            previousDay:         storyDay,
-            previousCalendarDay: lastCalendarDay,
-            currentCalendarDay:  calDay
-        )
+        if let forced = forceStoryDay {
+            // Settings-sheet override: pin the story day, but still update
+            // lastCalendarDay so a later un-set transitions cleanly.
+            storyDay = forced
+        } else {
+            storyDay = SceneScheduler.advanceDay(
+                previousDay:         storyDay,
+                previousCalendarDay: lastCalendarDay,
+                currentCalendarDay:  calDay
+            )
+        }
         lastCalendarDay  = calDay
 
         // Determine night + holiday from date (story.c:94–120, Go fixes)

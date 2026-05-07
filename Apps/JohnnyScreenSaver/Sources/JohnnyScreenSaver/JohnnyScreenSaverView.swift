@@ -13,12 +13,12 @@
 //     stopAnimation() is unreliable; relying on it leaks the
 //     legacyScreenSaver process at high CPU after dismissal.
 //
-// Resource onboarding: the user picks a folder via the configure
-// sheet or the first-run floating panel; we store the plain path in
-// ScreenSaverDefaults(forModuleWithName:).  See ResourceFolder.swift.
-// We intentionally avoid security-scoped bookmarks because they are
-// sandbox-scoped to the creating process and cannot be resolved in
-// legacyScreenSaver (a separate sandbox container).
+// Resource onboarding: the user picks a folder via the configure sheet
+// or the first-run floating panel.  The configure sheet (System Settings)
+// stores only a plain path (used for the display label).  The first-run
+// panel runs inside legacyScreenSaver, so its NSOpenPanel result carries
+// the right sandbox context; save(folder:) creates a security-scoped
+// bookmark that persists across launches.  See ResourceFolder.swift.
 
 import ScreenSaver
 import AppKit
@@ -56,6 +56,22 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// from the previous tick's `mini` return. Floored at 4 so we
     /// never spin at display refresh rate when the engine reports 0.
     private var lastMiniMS: Int = 4
+
+    /// Animation-speed multiplier captured at startup (settings sheet).
+    /// 1.0 = faithful pacing; 2.0 doubles speed; 0.5 halves it.
+    private var animationSpeed: Double = 1.0
+
+    // ---- Debug overlay (only created when ResourceFolder.debugOverlayEnabled) ----
+
+    /// HUD displayed in the top-left when the user enables "Show debug overlay"
+    /// in the configure sheet.  Native AppKit (NSTextField) — avoids the
+    /// SwiftUI / EngineDebugState plumbing that the saver doesn't otherwise need.
+    private var debugOverlay: NSTextField?
+
+    /// Frame counter and timestamp used for the overlay's FPS readout.
+    private var debugFrameCount:    Int            = 0
+    private var debugLastFPSTime:   CFTimeInterval = 0
+    private var debugLastFPS:       Double         = 0
 
     /// Reason the engine isn't running, surfaced for the idle frame.
     private enum LoadState {
@@ -152,8 +168,18 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
     public override func stopAnimation() {
         super.stopAnimation()
-        // Don't tear down here — viewDidMoveToWindow(nil) is the
-        // reliable teardown point on macOS 14+.
+        // Silence audio synchronously every time stopAnimation fires.
+        //
+        // We intentionally do NOT tear down the engine / Metal here —
+        // viewDidMoveToWindow(nil) is the reliable teardown point on
+        // macOS 14+, and stopAnimation can fire repeatedly when the
+        // System Settings preview pane pauses.  But AVAudioPlayer
+        // keeps audio in a hardware buffer that survives object release,
+        // so silencing it on every stopAnimation is the only way to
+        // guarantee sound stops the instant the user dismisses the
+        // screensaver — even if the view-removal callbacks lag.
+        soundSink.stopAll()
+        NSLog("[Johnny] stopAnimation: audio silenced")
     }
 
     public override func viewDidMoveToWindow() {
@@ -233,15 +259,51 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             let archive = try ResourceArchive.parse(map: mapData, container: containerData)
             NSLog("[Johnny] startupIfNeeded: archive parsed OK")
 
+            // Apply configure-sheet settings (§2.4):
+            //
+            // • Force Holiday: if non-zero, the StoryRunner sees a synthesised
+            //   date inside the holiday window so SceneScheduler.holiday()
+            //   triggers the matching decoration.
+            // • Force Story Day: post-init override on StoryRunner's
+            //   forceStoryDay, applied to every beginNextSequence call.
+            // • Fidelity Mode: post-init property on StoryRunner.
+            // • Animation Speed: cached for animateOneFrame pacing.
+            let holidayCode = ResourceFolder.forceHoliday
+            let dateProvider: DateProvider = {
+                if let forced = ResourceFolder.dateForForcedHoliday(holidayCode) {
+                    NSLog("[Johnny] startupIfNeeded: forcing holiday=%d (date=%@)",
+                          holidayCode, "\(forced)")
+                    return FixedDateProvider(forced)
+                }
+                return SystemDateProvider()
+            }()
+
             let runner = try StoryRunner(
                 archive:      archive,
-                dateProvider: SystemDateProvider(),
+                dateProvider: dateProvider,
                 sound:        soundSink
             )
+            runner.fidelityMode = ResourceFolder.fidelityMode
+            let forcedDay = ResourceFolder.forceStoryDay
+            runner.forceStoryDay = (forcedDay > 0) ? forcedDay : nil
+            self.animationSpeed  = ResourceFolder.animationSpeed
+            NSLog("[Johnny] startupIfNeeded: settings — fidelity=%@ forceDay=%d speed=%.2f overlay=%d",
+                  runner.fidelityMode.rawValue,
+                  forcedDay,
+                  self.animationSpeed,
+                  ResourceFolder.debugOverlayEnabled ? 1 : 0)
+
             NSLog("[Johnny] startupIfNeeded: StoryRunner created — engine is live")
             self.storyRunner  = runner
             self.loadState    = .loaded
             self.lastTickWall = CACurrentMediaTime()
+
+            // Install the debug HUD if enabled.
+            if ResourceFolder.debugOverlayEnabled {
+                installDebugOverlay()
+            } else {
+                removeDebugOverlay()
+            }
         } catch {
             NSLog("[Johnny] startupIfNeeded: archive/engine error — %@", error.localizedDescription)
             loadState = .error("Resources: \(error.localizedDescription)")
@@ -264,49 +326,59 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
     @MainActor
     private func presentResourcePickerIfNeeded() {
-        // Re-check: another code path might have resolved the folder
-        // (e.g. configure sheet arrived after all) between the async
-        // dispatch and now.
-        guard ResourceFolder.resolve() == nil else {
-            NSLog("[Johnny] presentResourcePickerIfNeeded: folder already configured — restarting")
-            resetAndStartup()
+        // Skip the panel only if the engine actually loaded.  We deliberately
+        // do NOT call ResourceFolder.resolve() here — on macOS 26 Tahoe the
+        // legacyScreenSaver sandbox allows stat() but blocks open() on
+        // ~/Documents, so fileExists() returns true and resolve() returns a
+        // non-nil URL even when Data(contentsOf:) will fail.  Using loadState
+        // avoids that false-positive and ensures the panel is always shown
+        // when the engine hasn't come up.
+        if case .loaded = loadState {
+            NSLog("[Johnny] presentResourcePickerIfNeeded: engine loaded — skipping panel")
             return
         }
 
-        NSLog("[Johnny] presentResourcePickerIfNeeded: showing setup panel")
+        NSLog("[Johnny] presentResourcePickerIfNeeded: showing setup panel (loadState=%@)",
+              { switch loadState { case .notLoaded:     return "notLoaded"
+                                   case .loaded:        return "loaded"
+                                   case .error(let e): return "error(\(e))" } }())
 
         // ---- Informational panel ----------------------------------------
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 180),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         panel.title = "Johnny Castaway — Setup"
         panel.isReleasedWhenClosed = false
-        panel.level = .floating        // appears above the screen-saver view
+        // Must be above the screensaver window (NSWindow.Level.screenSaver = 1000).
+        // .floating (level 3) is hidden behind it during full-screen activation.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         panel.center()
 
         let content = panel.contentView!
 
         let heading = NSTextField(labelWithString: "Sierra Resource Files Required")
         heading.font = .boldSystemFont(ofSize: 14)
-        heading.frame = NSRect(x: 20, y: 136, width: 440, height: 20)
+        heading.frame = NSRect(x: 20, y: 156, width: 440, height: 20)
         content.addSubview(heading)
 
         let body = NSTextField(wrappingLabelWithString:
-            "Johnny Castaway needs the original Sierra resource files to run. "
-          + "Click \u{201C}Choose Folder\u{2026}\u{201D} and select the folder that contains "
-          + "RESOURCE.MAP and RESOURCE.001."
+            "Johnny Castaway requires the original Sierra resource files to run. "
+          + "Click \u{201C}Choose Folder\u{2026}\u{201D} and select the folder that "
+          + "contains RESOURCE.MAP and RESOURCE.001.\n\n"
+          + "If you\u{2019}ve already set this in Screen Saver Options, "
+          + "select the same folder again \u{2014} macOS requires it to grant access."
         )
-        body.frame = NSRect(x: 20, y: 72, width: 440, height: 56)
+        body.frame = NSRect(x: 20, y: 76, width: 440, height: 72)
         content.addSubview(body)
 
         let statusLabel = NSTextField(labelWithString: "")
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .systemRed
-        statusLabel.frame = NSRect(x: 20, y: 52, width: 440, height: 16)
+        statusLabel.frame = NSRect(x: 20, y: 56, width: 440, height: 16)
         content.addSubview(statusLabel)
 
         // Keep a strong reference for the lifetime of the handler closures.
@@ -326,7 +398,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             target: nil,
             action: nil
         )
-        cancelButton.bezelStyle = .rounded
+        cancelButton.bezelStyle  = .rounded
         cancelButton.frame = NSRect(x: 360, y: 16, width: 100, height: 32)
         content.addSubview(cancelButton)
 
@@ -340,6 +412,15 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             openPanel.canChooseFiles          = false
             openPanel.canChooseDirectories    = true
             openPanel.allowsMultipleSelection = false
+
+            // Pre-navigate to the stored path's parent directory so the
+            // user can find their folder immediately without navigating.
+            // (Opening *inside* the target folder would require the user
+            // to go up one level to select it, so we use the parent.)
+            if let storedPath = ResourceFolder.displayPath {
+                openPanel.directoryURL = URL(fileURLWithPath: storedPath)
+                    .deletingLastPathComponent()
+            }
 
             // Present as a sheet attached to our floating panel so it
             // inherits the .floating window level and can't slip behind
@@ -403,7 +484,10 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                                    case .error(let e): return "error(\(e))" } }())
         renderer    = nil
         storyRunner = nil
-        soundSink   = NullSoundSink()   // releases AVAudioPlayer instances
+        soundSink.stopAll()             // halt in-flight audio before releasing
+        soundSink   = NullSoundSink()   // drop AVAudioPlayer instances
+        ResourceFolder.stopAccessing()  // release security-scoped sandbox token
+        removeDebugOverlay()
         // If we never successfully loaded, allow the picker to reappear
         // next time startAnimation fires (e.g. user dismisses screensaver
         // then re-triggers the hot corner without ever having configured).
@@ -420,7 +504,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         guard let metalLayer = layer as? CAMetalLayer,
               let renderer   = renderer else { return }
 
-        // Pace engine ticks against the previous tick's `mini`.
+        // Pace engine ticks against the previous tick's `mini`, scaled by
+        // the user's animation-speed multiplier.  Higher multiplier =>
+        // shorter wall-clock interval between ticks => faster animation.
         if let runner = storyRunner {
             let now       = CACurrentMediaTime()
             let elapsedMS = (now - lastTickWall) * 1000.0
@@ -430,7 +516,8 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                         try runner.beginNextSequence(rng: &rng)
                     }
                     let mini = try runner.tick(rng: &rng)
-                    lastMiniMS   = max(4, mini * 20)
+                    let scaledMS = Double(mini * 20) / max(0.1, animationSpeed)
+                    lastMiniMS   = max(4, Int(scaledMS.rounded()))
                     lastTickWall = now
                     renderer.update(framebuffer: runner.composedFramebuffer,
                                     palette:    runner.palette)
@@ -446,6 +533,92 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
         guard let drawable = metalLayer.nextDrawable() else { return }
         renderer.render(to: drawable, drawableSize: metalLayer.drawableSize)
+
+        // Update the debug HUD (cheap; only allocates a string once per frame).
+        if debugOverlay != nil { updateDebugOverlay() }
+    }
+
+    // ---------------------------------------------------------------
+    // MARK: Debug overlay (HUD)
+    // ---------------------------------------------------------------
+    //
+    // Native AppKit text label pinned to the top-left.  Shown only when
+    // ResourceFolder.debugOverlayEnabled is true.  This is intentionally
+    // simpler than the SwiftUI DebugOverlayView from JohnnyDebug — the
+    // saver doesn't host an `Engine` (only `StoryRunner`), so the full
+    // EngineDebugState wiring would add code without unique value here.
+
+    private func installDebugOverlay() {
+        guard debugOverlay == nil else { return }
+        let label = NSTextField(labelWithString: "")
+        label.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        label.textColor = .white
+        label.backgroundColor = NSColor.black.withAlphaComponent(0.55)
+        label.drawsBackground = true
+        label.alignment = .left
+        label.lineBreakMode = .byClipping
+        label.maximumNumberOfLines = 0   // multi-line
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+        ])
+        debugOverlay      = label
+        debugFrameCount   = 0
+        debugLastFPSTime  = CACurrentMediaTime()
+        debugLastFPS      = 0
+        NSLog("[Johnny] debug overlay installed")
+    }
+
+    private func removeDebugOverlay() {
+        debugOverlay?.removeFromSuperview()
+        debugOverlay = nil
+    }
+
+    /// Refresh the HUD text using the StoryRunner diagnostics.
+    /// Called once per `animateOneFrame` when the overlay is installed.
+    private func updateDebugOverlay() {
+        guard let label = debugOverlay else { return }
+        debugFrameCount += 1
+        let now = CACurrentMediaTime()
+        let dt  = now - debugLastFPSTime
+        if dt >= 0.5 {
+            debugLastFPS     = Double(debugFrameCount) / dt
+            debugFrameCount  = 0
+            debugLastFPSTime = now
+        }
+
+        let runner    = storyRunner
+        let lastSamp  = (soundSink as? AVAudioPlayerSoundSink)?.lastSampleID
+        let day       = runner?.storyDay ?? 0
+        let active    = runner?.activeThreadCount ?? 0
+        let allocated = runner?.allocatedThreadCount ?? 0
+        let opcodes   = runner?.coveredTTMOpcodes.count ?? 0
+        let fidelity  = runner?.fidelityMode.rawValue ?? "—"
+        let holiday   = ResourceFolder.forceHoliday
+        let holidayLabel: String = {
+            switch holiday {
+            case 1: return "Halloween"
+            case 2: return "St Patrick"
+            case 3: return "Christmas"
+            case 4: return "New Year"
+            default: return "auto"
+            }
+        }()
+
+        let text = """
+        Johnny Castaway — debug
+        day:       \(day)\(runner?.forceStoryDay != nil ? " (forced)" : "")
+        threads:   \(active)/\(allocated) active
+        opcodes:   \(opcodes) covered
+        fidelity:  \(fidelity)
+        holiday:   \(holidayLabel)
+        speed:     \(String(format: "%.1f×", animationSpeed))
+        last snd:  \(lastSamp.map(String.init) ?? "—")
+        fps:       \(String(format: "%.1f", debugLastFPS))
+        """
+        label.stringValue = text
     }
 
     // ---------------------------------------------------------------

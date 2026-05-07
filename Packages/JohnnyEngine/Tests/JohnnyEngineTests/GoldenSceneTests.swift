@@ -111,4 +111,5 @@ final class RecordingSoundSink: SoundSink, @unchecked Sendable {
     private let callback: (Int) -> Void
     init(_ callback: @escaping (Int) -> Void) { self.callback = callback }
     func playSample(_ id: Int) { callback(id) }
+    func stopAll() {}
 }
