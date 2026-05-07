@@ -234,13 +234,20 @@ enum ResourceFolder {
 
     /// Whether the user has sound enabled.
     ///
-    /// Defaults to `true` (absent key → on) so sounds work out of the
-    /// box before the configure sheet is set up.
+    /// Defaults to `false` (absent key → off).  The Tahoe legacy
+    /// screensaver host has known issues where Settings' preview
+    /// process can be left orphaned after the user closes Settings,
+    /// continuing to play audio in the background.  Defaulting sound
+    /// off means new users never encounter that surprise; they can
+    /// opt in from the configure sheet once they understand the
+    /// trade-off.
     static var soundEnabled: Bool {
         get {
             // UserDefaults.bool(forKey:) returns false for a missing key,
-            // but we want the default to be true.
-            guard sharedDefaults.object(forKey: soundEnabledKey) != nil else { return true }
+            // which is now what we want anyway — but we keep the explicit
+            // object-presence check for clarity and so the default can be
+            // adjusted in one place.
+            guard sharedDefaults.object(forKey: soundEnabledKey) != nil else { return false }
             return sharedDefaults.bool(forKey: soundEnabledKey)
         }
         set {
