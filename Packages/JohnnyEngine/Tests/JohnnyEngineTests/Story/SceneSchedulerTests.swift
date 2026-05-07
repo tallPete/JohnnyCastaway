@@ -307,6 +307,23 @@ struct AdvanceDayTests {
         let day = SceneScheduler.advanceDay(previousDay: 0, previousCalendarDay: 1, currentCalendarDay: 1)
         #expect(day == 1)
     }
+
+    @Test("Sentinel previousCalendarDay (-1) does NOT advance day on first run")
+    func sentinelFirstRun() {
+        // Before the sentinel-handling fix, a fresh StoryRunner with
+        // lastCalendarDay = -1 would always start at day 2 because the
+        // (-1 != calDay) test fired on the first beginNextSequence call.
+        let day = SceneScheduler.advanceDay(previousDay: 1, previousCalendarDay: -1, currentCalendarDay: 127)
+        #expect(day == 1, "first run with no prior calendar record should stay at the seeded day")
+    }
+
+    @Test("Sentinel with seeded day 7 stays at 7")
+    func sentinelPreservesSeed() {
+        // When initial state is restored from persistence, the seeded day
+        // should be respected even if no prior calendar day is on record.
+        let day = SceneScheduler.advanceDay(previousDay: 7, previousCalendarDay: -1, currentCalendarDay: 200)
+        #expect(day == 7)
+    }
 }
 
 // ---------------------------------------------------------------

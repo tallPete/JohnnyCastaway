@@ -51,6 +51,13 @@ enum ResourceFolder {
     private static let fidelityModeKey    = "FidelityMode"     // String; "fixed" | "raw"
     private static let debugOverlayKey    = "ShowDebugOverlay" // Bool
 
+    // Multi-day-arc persistence: written every time the engine advances
+    // a sequence (so the user's progress through Sierra's 11-day story
+    // survives across screensaver activations).  See "Story-arc
+    // persistence" section below.
+    private static let progressDayKey     = "ProgressStoryDay"        // Int; 1–11
+    private static let progressCalDayKey  = "ProgressLastCalendarDay" // Int; day-of-year, -1 = unset
+
     // Cache the defaults object.  ScreenSaverDefaults(forModuleWithName:)
     // can return nil if called before the bundle is registered; the lazy
     // initialiser runs on first access, which is always after init().
@@ -345,6 +352,55 @@ enum ResourceFolder {
         default: return nil
         }
         return Calendar.current.date(from: comps)
+    }
+
+    // ---------------------------------------------------------------
+    // MARK: Story-arc persistence
+    // ---------------------------------------------------------------
+    //
+    // Sierra's original Johnny Castaway has an 11-day story arc — the
+    // raft grows over the days, eventually Johnny leaves the island,
+    // and the cycle restarts.  The original game persisted the
+    // current day and last-modified-date in CASTAWAY.INI; jc_reborn
+    // does the same in a config file.  We persist them in
+    // ScreenSaverDefaults so the arc survives across screensaver
+    // activations (each activation creates a fresh StoryRunner — without
+    // persistence, every session would start at day 1).
+    //
+    // The host writes progress after every successful beginNextSequence
+    // call, but only when forceStoryDay is unset — we don't let a
+    // temporary diagnostic override pollute the natural-progression state.
+
+    /// The persisted story day from a prior activation, or 1 if unset.
+    /// Clamped to `[1, 11]` defensively.
+    static var persistedStoryDay: Int {
+        guard sharedDefaults.object(forKey: progressDayKey) != nil else { return 1 }
+        let raw = sharedDefaults.integer(forKey: progressDayKey)
+        return max(1, min(11, raw))
+    }
+
+    /// The persisted day-of-year when the story day was last advanced,
+    /// or `-1` (sentinel: "no prior record") if unset.
+    static var persistedLastCalendarDay: Int {
+        guard sharedDefaults.object(forKey: progressCalDayKey) != nil else { return -1 }
+        return sharedDefaults.integer(forKey: progressCalDayKey)
+    }
+
+    /// Save the engine's natural-progression state for the next activation.
+    /// Called after `beginNextSequence`; cheap (≤ once per ~30 s).
+    static func saveStoryProgress(day: Int, lastCalendarDay: Int) {
+        sharedDefaults.set(day,             forKey: progressDayKey)
+        sharedDefaults.set(lastCalendarDay, forKey: progressCalDayKey)
+        sharedDefaults.synchronize()
+    }
+
+    /// Reset the persisted story arc.  Not currently surfaced in the
+    /// configure sheet — exposed for future "Restart story" button.
+    static func clearStoryProgress() {
+        sharedDefaults.removeObject(forKey: progressDayKey)
+        sharedDefaults.removeObject(forKey: progressCalDayKey)
+        sharedDefaults.synchronize()
+        NSLog("[Johnny] ResourceFolder.clearStoryProgress: done")
     }
 
     // ---------------------------------------------------------------

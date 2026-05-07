@@ -360,20 +360,30 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                 return SystemDateProvider()
             }()
 
+            // Restore persisted story progression from a prior activation.
+            // Without this, every screensaver launch creates a fresh
+            // StoryRunner stuck at day 1 — Sierra's 11-day arc (raft
+            // growing, Johnny leaving the island) would be unreachable.
+            let persistedDay    = ResourceFolder.persistedStoryDay
+            let persistedCalDay = ResourceFolder.persistedLastCalendarDay
             let runner = try StoryRunner(
-                archive:      archive,
-                dateProvider: dateProvider,
-                sound:        soundSink
+                archive:                archive,
+                dateProvider:           dateProvider,
+                sound:                  soundSink,
+                initialStoryDay:        persistedDay,
+                initialLastCalendarDay: persistedCalDay
             )
             runner.fidelityMode = ResourceFolder.fidelityMode
             let forcedDay = ResourceFolder.forceStoryDay
             runner.forceStoryDay = (forcedDay > 0) ? forcedDay : nil
             self.animationSpeed  = ResourceFolder.animationSpeed
-            NSLog("[Johnny] startupIfNeeded: settings — fidelity=%@ forceDay=%d speed=%.2f overlay=%d",
+            NSLog("[Johnny] startupIfNeeded: settings — fidelity=%@ forceDay=%d speed=%.2f overlay=%d storyDay=%d (persisted, lastCalDay=%d)",
                   runner.fidelityMode.rawValue,
                   forcedDay,
                   self.animationSpeed,
-                  ResourceFolder.debugOverlayEnabled ? 1 : 0)
+                  ResourceFolder.debugOverlayEnabled ? 1 : 0,
+                  persistedDay,
+                  persistedCalDay)
 
             NSLog("[Johnny] startupIfNeeded: StoryRunner created — engine is live")
             self.storyRunner  = runner
@@ -634,6 +644,18 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                 do {
                     if runner.sequenceFinished {
                         try runner.beginNextSequence(rng: &rng)
+                        // Persist story progression — but only when the
+                        // user hasn't pinned the day via the configure
+                        // sheet's force-day override.  Persisting while
+                        // forced would let a temporary diagnostic override
+                        // (e.g. "preview day 8") leak into the permanent
+                        // natural-progression state.
+                        if runner.forceStoryDay == nil {
+                            ResourceFolder.saveStoryProgress(
+                                day:             runner.storyDay,
+                                lastCalendarDay: runner.lastCalendarDay
+                            )
+                        }
                     }
                     let mini = try runner.tick(rng: &rng)
                     let scaledMS = Double(mini * 20) / max(0.1, animationSpeed)

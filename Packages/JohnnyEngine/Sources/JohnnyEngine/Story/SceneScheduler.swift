@@ -155,6 +155,10 @@ public struct SceneScheduler {
     /// - Parameters:
     ///   - previousDay:         Last persisted story day (1–11).
     ///   - previousCalendarDay: Day-of-year when `previousDay` was written.
+    ///                          Pass any negative value (e.g. -1) as a
+    ///                          "no prior record exists" sentinel — in
+    ///                          that case the day is NOT advanced, only
+    ///                          clamped to the valid 1–11 range.
     ///   - currentCalendarDay:  Day-of-year today.
     /// Wraps back to 1 after day 11.
     public static func advanceDay(
@@ -163,7 +167,10 @@ public struct SceneScheduler {
         currentCalendarDay:  Int
     ) -> Int {
         var day = previousDay
-        if currentCalendarDay != previousCalendarDay {
+        // Sentinel: no prior persisted record → don't advance, just clamp.
+        // Fixes the off-by-one where a fresh StoryRunner with
+        // lastCalendarDay = -1 would always start at day 2 because (-1 != calDay).
+        if previousCalendarDay >= 0 && currentCalendarDay != previousCalendarDay {
             day += 1
         }
         if day < 1 || day > 11 { day = 1 }

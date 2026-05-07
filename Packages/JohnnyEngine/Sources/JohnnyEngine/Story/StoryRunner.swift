@@ -61,7 +61,10 @@ public final class StoryRunner {
     public private(set) var storyDay: Int = 1
 
     /// Last calendar day-of-year that was used to advance `storyDay`.
-    private var lastCalendarDay: Int = -1
+    /// Public so the host can persist it across launches alongside
+    /// `storyDay` (init seeds via the `initialLastCalendarDay`
+    /// argument); a negative value is the "no prior record" sentinel.
+    public private(set) var lastCalendarDay: Int = -1
 
     /// Current island configuration.
     public private(set) var islandState: IslandState = IslandState()
@@ -101,10 +104,28 @@ public final class StoryRunner {
     // MARK: Init
     // ---------------------------------------------------------------
 
+    /// Construct a StoryRunner.
+    ///
+    /// - Parameters:
+    ///   - archive:                Parsed resource archive.
+    ///   - dateProvider:           Current-date source (defaults to system).
+    ///   - sound:                  Sound trigger sink (defaults to no-op).
+    ///   - initialStoryDay:        Day in the 11-day story cycle to start
+    ///                             from.  Use `1` for first run; load from
+    ///                             persistent storage on subsequent runs.
+    ///                             Clamped to `[1, 11]`.
+    ///   - initialLastCalendarDay: Day-of-year (1–366) when the story day
+    ///                             was last advanced.  Use `-1` (sentinel)
+    ///                             for first run; load from persistent
+    ///                             storage on subsequent runs.  When
+    ///                             negative, the next `beginNextSequence`
+    ///                             call will not advance the day.
     public init(
-        archive:       ResourceArchive,
-        dateProvider:  DateProvider  = SystemDateProvider(),
-        sound:         SoundSink     = NullSoundSink()
+        archive:                ResourceArchive,
+        dateProvider:           DateProvider  = SystemDateProvider(),
+        sound:                  SoundSink     = NullSoundSink(),
+        initialStoryDay:        Int           = 1,
+        initialLastCalendarDay: Int           = -1
     ) throws {
         let rcache      = ResourceCache(archive: archive)
         self.cache      = rcache
@@ -118,6 +139,12 @@ public final class StoryRunner {
         let pal = try rcache.firstPalette()
         self.palette = EnginePalette(from: pal)
         graphics.transparentIndex = self.palette.transparentIndex
+
+        // Restore persisted state.  Day is clamped to the legal range
+        // (1–11); a corrupt persisted value rolls back to day 1 rather
+        // than getting stuck at an invalid scene-eligibility state.
+        self.storyDay        = max(1, min(11, initialStoryDay))
+        self.lastCalendarDay = initialLastCalendarDay
     }
 
     // ---------------------------------------------------------------
