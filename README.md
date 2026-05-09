@@ -8,6 +8,12 @@ nearest-neighbour scaling, driven by a clean-room reimplementation of
 Sierra's TTM/ADS bytecode interpreter, scene scheduler, walk-graph
 pathfinder, and 11-day story arc.
 
+![Johnny Castaway screensaver running behind the macOS lock screen](Docs/screenshot-v1.1.png)
+
+*The screensaver running on macOS 26 Tahoe — Johnny resting under
+the palm tree on a moonlit night, with the lock-screen overlay
+showing it's a genuine `.saver` bundle.*
+
 > **No Sierra data is included.** This repository contains only the
 > reimplemented engine and renderer. To run the screensaver you must
 > supply your own `RESOURCE.MAP`, `RESOURCE.001`, and `sound*.wav`
@@ -132,12 +138,7 @@ canonical set; the engine silently skips them.
 
 > **Note on the RESOURCE.MAP / RESOURCE.001 hashes:** the values
 > above are empirically verified against a working install of this
-> project (and they agree with the Go port's README).  The
-> `jc_reborn` README has these two hashes swapped relative to what
-> our parser, the Go port, and likely-canonical Sierra distributions
-> see in practice — if you've followed jc_reborn's table and find
-> the saver doesn't load, double-check your file names against the
-> hashes above.
+> project (and they agree with the Go port's README).
 
 The screensaver will not run without `RESOURCE.MAP` and
 `RESOURCE.001`. Sound files are optional. The sound files have been
@@ -272,11 +273,9 @@ review cadence is best-effort.
 
 - **macOS 26 Tahoe orphan process.** When System Settings'
   screensaver preview is dismissed, the host `legacyScreenSaver`
-  process can be left running in the background. This is an Apple
-  framework issue (no reliable signal is propagated to the
-  `.saver` bundle); manual `killall legacyScreenSaver` cleans it
+  process can be left running in the background. A manual `killall legacyScreenSaver` cleans it
   up. Defending against this from inside the bundle is documented
-  in `JohnnyScreenSaverView.swift` as work that hit a wall.
+  in `JohnnyScreenSaverView.swift` as a work in progress.
 - **No CRT shader.** The renderer is nearest-neighbour pixel-
   perfect; a Phase 7 polish item would add a CRT/scanline filter.
 - **Sound playback.** Default off. Plays at native sample rate
