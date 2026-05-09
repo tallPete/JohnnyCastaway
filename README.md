@@ -93,13 +93,12 @@ The screensaver requires the original `RESOURCE.MAP` and
 optional. Copy the files into a folder of your choosing, then point
 the configure sheet at that folder.
 
-For reference, the canonical files have these sizes and md5 hashes
-(table sourced from the `jc_reborn` project):
+For reference, the canonical files have these md5 hashes:
 
 | File name    | size (bytes) | md5                              |
 | ------------ | ------------ | -------------------------------- |
-| RESOURCE.MAP |         1461 | 8bb6c99e9129806b5089a39d24228a36 |
-| RESOURCE.001 |      1175645 | 374e6d05c5e0acd88fb5af748948c899 |
+| RESOURCE.MAP |          —   | 374e6d05c5e0acd88fb5af748948c899 |
+| RESOURCE.001 |          —   | 8bb6c99e9129806b5089a39d24228a36 |
 | sound0.wav   |        10768 | 53695b0df262c2a8772f69b95fd89463 |
 | sound1.wav   |        11264 | 35d08fdf2b29fc784cbec78b1fe9a7f2 |
 | sound2.wav   |         1536 | f93710cc6f70633393423a8a152a2c85 |
@@ -126,6 +125,15 @@ For reference, the canonical files have these sizes and md5 hashes
 
 `sound11.wav` and `sound13.wav` are intentionally absent from the
 canonical set; the engine silently skips them.
+
+> **Note on the RESOURCE.MAP / RESOURCE.001 hashes:** the values
+> above are empirically verified against a working install of this
+> project (and they agree with the Go port's README).  The
+> `jc_reborn` README has these two hashes swapped relative to what
+> our parser, the Go port, and likely-canonical Sierra distributions
+> see in practice — if you've followed jc_reborn's table and find
+> the saver doesn't load, double-check your file names against the
+> hashes above.
 
 The screensaver will not run without `RESOURCE.MAP` and
 `RESOURCE.001`. Sound files are optional. The sound files have been
