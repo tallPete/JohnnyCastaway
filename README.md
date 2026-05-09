@@ -198,6 +198,8 @@ overwrite the persistent natural-progression story state.
 
 ## Acknowledgements
 
+Firstly, please let me give credit to **Shawn Bird**, who designed the characters I've spent so much time watching.
+
 This project stands on a long chain of prior reverse-engineering
 work. None of it would have been possible without the people below;
 many thanks to all of them.
