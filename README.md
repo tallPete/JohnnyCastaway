@@ -18,9 +18,13 @@ pathfinder, and 11-day story arc.
 ## Status
 
 **v1.1** — feature-complete and stable. Tested on macOS 26 Tahoe,
-Apple Silicon. Runs unattended for hours; the multi-day story arc,
-raft progression, holiday decorations, and visitor scenes all play
-correctly.
+Apple Silicon. Runs unattended for hours. As of this release the
+multi-day story arc has been observed through the early days
+(raft size 1, day-driven scene selection, holiday triggers via the
+force-holiday override); end-to-end verification of all eleven
+days, the leftIsland visitor scenes, and the cycle wrap to day 1
+is in progress and will catch up to the code as wall-clock days
+elapse.
 
 Highlights:
 
