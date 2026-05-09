@@ -198,7 +198,7 @@ overwrite the persistent natural-progression story state.
 
 ## Acknowledgements
 
-Firstly, please let me give credit to **Shawn Bird**, who designed the characters I've spent so much time watching.
+Firstly, please let me give credit to **Shawn Bird**, **Jeff Tunnell** and the **Dynamix team** who designed and produced the Johnny Castaway characters and code I've spent so much time watching.
 
 This project stands on a long chain of prior reverse-engineering
 work. None of it would have been possible without the people below;
