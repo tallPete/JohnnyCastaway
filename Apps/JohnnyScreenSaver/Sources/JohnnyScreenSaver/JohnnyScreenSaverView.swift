@@ -664,13 +664,20 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                     let mini = try runner.tick(rng: &rng)
                     let scaledMS = Double(mini * 20) / max(0.1, animationSpeed)
                     lastMiniMS   = max(4, Int(scaledMS.rounded()))
-                    lastTickWall = now
-                    renderer.update(framebuffer: runner.composedFramebuffer,
-                                    palette:    runner.palette)
                 } catch {
                     NSLog("[Johnny] animateOneFrame tick error: %@", error.localizedDescription)
                     loadState = .error("Tick: \(error.localizedDescription)")
+                    // Back off ~2 s before retrying so a persistent resource
+                    // error doesn't spin the engine at 100 ticks/s.
+                    lastMiniMS = 100
                 }
+                // Always advance the wall clock and push a frame, even on
+                // error. Without this, lastTickWall stays frozen, every timer
+                // fire re-enters the tick path, and renderer.update is never
+                // called — leaving the display permanently black.
+                lastTickWall = now
+                renderer.update(framebuffer: runner.composedFramebuffer,
+                                palette:    runner.palette)
             }
         }
         // (If no story runner, the framebuffer was either never

@@ -300,8 +300,21 @@ public final class StoryRunner {
             return 1
 
         case .idle:
-            // Transition: set up next planned scene (or walk to it first)
-            try transitionToNextScene(rng: &rng)
+            // Transition: set up next planned scene (or walk to it first).
+            // If a resource fails to load (missing TTM / SCR), skip this
+            // scene rather than looping on the error indefinitely. The
+            // .done / beginNextSequence path will re-plan the sequence on
+            // the next cycle, giving the engine a chance to recover.
+            do {
+                try transitionToNextScene(rng: &rng)
+            } catch {
+                print("[story] transitionToNextScene error (skipping scene): \(error)")
+                scenePlanIndex += 1
+                if scenePlanIndex >= scenePlan.count {
+                    state = .done
+                }
+                // state remains .idle if scenes remain; next tick tries the next one.
+            }
             return 0
 
         case .setupIsland:
