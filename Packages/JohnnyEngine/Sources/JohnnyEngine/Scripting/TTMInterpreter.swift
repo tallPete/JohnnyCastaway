@@ -282,15 +282,16 @@ enum TTMInterpreter {
             case 0xA601:   // CLEAR_SCREEN
                 graphics.clearScreen(layer: &thread.layer)
 
-            case 0xB606:   // DRAW_SCREEN — blit the LOAD_SCREEN'd SCR at (x,y)
-                // Semantics from JCOS TTMPlayer.cs:408-419: draw the SCR
-                // stored by the most recent LOAD_SCREEN onto the layer at
-                // args[0], args[1]. Args 2-5 (w, h, ?, ?) are unused.
-                graphics.drawScreen(
-                    on: &thread.layer,
-                    x:  Int(Int16(bitPattern: args[0])),
-                    y:  Int(Int16(bitPattern: args[1]))
-                )
+            case 0xB606:   // DRAW_SCREEN — intentional no-op
+                // JCOS draws the LOAD_SCREEN'd SCR onto its flat composite
+                // surface. In our layered model, LOAD_SCREEN already stores
+                // the SCR in graphics.background and the compositor blits it
+                // as the base layer automatically. Blitting it again onto a
+                // thread layer overwrites sprites drawn by lower-numbered
+                // threads (confirmed: produces a background-shaped patch over
+                // the sailing-ship scene). jc_reborn and the Go port both
+                // skip this opcode for the same architectural reason.
+                break
 
             case 0xC051:   // PLAY_SAMPLE
                 sound.playSample(Int(args[0]))
