@@ -545,9 +545,25 @@ public final class StoryRunner {
         scheduler.backgroundThread.isRunning = 3  // special background state
         scheduler.backgroundThread.delay     = 8
         scheduler.backgroundThread.timer     = 8  // island.c:146: delay = timer = 8
+
+        // Capture `state` by value rather than reading self.islandState on
+        // every tick.  The closure fires dozens of times per minute; each
+        // read of a class stored-property through an escaping closure generates
+        // a swift_beginAccess / swift_endAccess pair that, under the optional-
+        // closure calling convention, can leak access records into the Swift
+        // runtime's AccessSet linked list.  After several hours the list grows
+        // long enough that each traversal dominates the main thread (99 % CPU).
+        //
+        // `state` is already a by-value copy of self.islandState passed into
+        // setupIsland — capturing it here is semantically identical: animate()
+        // only reads state.xPos / yPos / lowTide, which are fixed for the
+        // lifetime of one island setup.  If islandState changes (e.g. the
+        // LOAD_SCREEN restoration path), setupIsland is re-called and a fresh
+        // closure is installed, so the captured value is always current.
+        let tickState = state
         scheduler.onBackgroundTick = { [weak self] in
             guard let self else { return }
-            self.islandRdr.animate(state: self.islandState)
+            self.islandRdr.animate(state: tickState)
         }
 
         // Holiday decoration layer
