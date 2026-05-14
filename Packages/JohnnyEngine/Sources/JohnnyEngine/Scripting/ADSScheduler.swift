@@ -619,7 +619,15 @@ final class ADSScheduler {
         for t in threads     { t.free() }
         numThreads        = 0
         stopRequested     = false
-        snapshotFramebuffer = nil   // discard prior scene's last snapshot
+        // snapshotFramebuffer is intentionally NOT cleared here. Framebuffer
+        // is a value-type copy, so the previous scene's last snapshot remains
+        // valid even as the new scene's threads are reset. Keeping it alive
+        // means composedFramebuffer continues to return the previous frame for
+        // the one tick between beginADS (which resets threads to empty layers)
+        // and the first scheduler.tick() (which plays opcodes and takes a fresh
+        // snapshot). Without this, composedFramebuffer falls back to
+        // composeFramebufferNow() over un-played layers, which shows only the
+        // background — a one-frame flicker where Johnny vanishes at scene start.
         // Note: graphics.dx/dy are NOT reset here. jc_reborn's adsPlay() leaves
         // them alone — the caller (story.c / Engine façade) is responsible for
         // setting them to the island offset (or zero for non-island scenes)
