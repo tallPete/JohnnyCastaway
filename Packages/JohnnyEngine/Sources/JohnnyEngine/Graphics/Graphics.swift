@@ -140,10 +140,12 @@ public final class GraphicsState: @unchecked Sendable {
         width: Int, height: Int,
         color: UInt8
     ) {
-        let x1 = (inX + dx).clampedTo(0, Framebuffer.width - 1)
-        let y1 = (inY + dy).clampedTo(0, Framebuffer.height - 1)
-        let x2 = (inX + dx + width).clampedTo(0, Framebuffer.width)
-        let y2 = (inY + dy + height).clampedTo(0, Framebuffer.height)
+        let clip = layer.clipRect
+        let x1 = max(inX + dx, clip.x1)
+        let y1 = max(inY + dy, clip.y1)
+        let x2 = min(inX + dx + width,  clip.x2)
+        let y2 = min(inY + dy + height, clip.y2)
+        guard x1 < x2, y1 < y2 else { return }
         for row in y1 ..< y2 {
             let base = row * Framebuffer.width
             for col in x1 ..< x2 {
@@ -245,12 +247,13 @@ public final class GraphicsState: @unchecked Sendable {
         let w  = Int(bitmap.widths[spriteNo])
         let h  = Int(bitmap.heights[spriteNo])
         let spritePixels = bitmap.pixels(forSprite: spriteNo)
+        let clip = layer.clipRect
         for row in 0 ..< h {
             let dy2 = by + row
-            guard dy2 >= 0 && dy2 < Framebuffer.height else { continue }
+            guard dy2 >= clip.y1 && dy2 < clip.y2 else { continue }
             for col in 0 ..< w {
                 let dx2 = bx + col
-                guard dx2 >= 0 && dx2 < Framebuffer.width else { continue }
+                guard dx2 >= clip.x1 && dx2 < clip.x2 else { continue }
                 let px = spritePixels[row * w + col]
                 if px != 0xFF && px != transparentIndex {
                     layer.pixels[dy2 * Framebuffer.width + dx2] = px
@@ -275,12 +278,13 @@ public final class GraphicsState: @unchecked Sendable {
         let bx = (inX + dx) + (w - 1)
         let by = inY + dy
         let spritePixels = bitmap.pixels(forSprite: spriteNo)
+        let clip = layer.clipRect
         for row in 0 ..< h {
             let dy2 = by + row
-            guard dy2 >= 0 && dy2 < Framebuffer.height else { continue }
+            guard dy2 >= clip.y1 && dy2 < clip.y2 else { continue }
             for col in 0 ..< w {
                 let dx2 = bx - col    // mirror x
-                guard dx2 >= 0 && dx2 < Framebuffer.width else { continue }
+                guard dx2 >= clip.x1 && dx2 < clip.x2 else { continue }
                 let px = spritePixels[row * w + col]
                 if px != 0xFF && px != transparentIndex {
                     layer.pixels[dy2 * Framebuffer.width + dx2] = px
@@ -450,9 +454,10 @@ public final class GraphicsState: @unchecked Sendable {
         x1: Int, x2: Int, y: Int,
         color: UInt8
     ) {
-        guard y >= 0 && y < Framebuffer.height else { return }
-        let cx1 = max(x1, 0)
-        let cx2 = min(x2, Framebuffer.width)
+        let clip = layer.clipRect
+        guard y >= clip.y1 && y < clip.y2 else { return }
+        let cx1 = max(x1, clip.x1)
+        let cx2 = min(x2, clip.x2)
         guard cx1 < cx2 else { return }
         let base = y * Framebuffer.width
         for x in cx1 ..< cx2 {
