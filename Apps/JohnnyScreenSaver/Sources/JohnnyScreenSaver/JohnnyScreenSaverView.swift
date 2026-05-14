@@ -148,9 +148,13 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         super.init(frame: frame, isPreview: isPreview)
         wantsLayer = true
         // ScreenSaverView's animationTimeInterval is the cadence at
-        // which animateOneFrame() is called. We pace internally
-        // anyway, so a high cadence (1/30 s) is fine.
-        animationTimeInterval = 1.0 / 30.0
+        // which animateOneFrame() is called. We pace internally via
+        // lastMiniMS (each engine mini-tick = 20 ms in jc_reborn), so
+        // the timer must fire faster than 20 ms to allow accurate tick
+        // timing. 1/100 s (10 ms) means the pacing logic can hit 20 ms
+        // steps to within one timer interval, matching grFadeOut()'s
+        // eventsWaitTick(1) = 20 ms per wipe step.
+        animationTimeInterval = 1.0 / 100.0
         originalParentPID = getppid()
         NSLog("[Johnny] init(frame:isPreview:) preview=%d process=%@ parentPID=%d",
               isPreview ? 1 : 0, ProcessInfo.processInfo.processName, originalParentPID)
@@ -160,7 +164,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
-        animationTimeInterval = 1.0 / 30.0
+        animationTimeInterval = 1.0 / 100.0
         originalParentPID = getppid()
         NSLog("[Johnny] init(coder:) parentPID=%d", originalParentPID)
         installDismissalObservers()

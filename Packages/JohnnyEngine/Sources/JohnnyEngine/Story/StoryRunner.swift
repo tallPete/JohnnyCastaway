@@ -34,6 +34,9 @@ private enum StoryState {
     case setupIsland
     case walking(WalkController, walkBmp: Bitmap, bgBmp: Bitmap)
     case playingScene(adsName: String, adsTag: Int)
+    // Showing INTRO.SCR before the first sequence (ads.c:855–861 adsPlayIntro).
+    // ticksRemaining counts down at 1 per tick; when it hits 0 the wipe starts.
+    case playingIntro(ticksRemaining: Int)
     case fadeOut
     case done
 }
@@ -84,6 +87,16 @@ public final class StoryRunner {
 
     private var state: StoryState = .idle
     private var playingTicks: Int = 0
+
+    // INTRO.SCR framebuffer, loaded once at init. nil if resource unavailable.
+    private var introFrame: Framebuffer? = nil
+    // Active wipe controller; non-nil only during .fadeOut.
+    private var wipeController: WipeController? = nil
+    // Mirrors `static int fadeOutType` in graphics.c:606, but per-instance so
+    // multiple screensaver views (multi-display, System Settings preview pane)
+    // each cycle independently. The intro wipe always uses type 0 explicitly;
+    // this counter starts at 1 and advances for each subsequent day-end wipe.
+    private var nextWipeType: Int = 1
 
     /// Mini-ticks remaining from the previous walker frame's returned delay.
     /// When >0, the next .walking tick pauses (ticking only the wave/background
@@ -145,6 +158,20 @@ public final class StoryRunner {
         // than getting stuck at an invalid scene-eligibility state.
         self.storyDay        = max(1, min(11, initialStoryDay))
         self.lastCalendarDay = initialLastCalendarDay
+
+        // Load INTRO.SCR for the startup title screen (adsPlayIntro in ads.c:855).
+        // On success, start in .playingIntro so the title is shown before the
+        // first sequence begins. If the resource is missing (shouldn't happen
+        // with a valid archive), fall through to the normal .idle start.
+        if let scr = try? rcache.screen(named: "INTRO.SCR") {
+            var fb = Framebuffer(filledWith: 0xFF)
+            let count = min(scr.pixels.count, fb.pixels.count)
+            for i in 0 ..< count { fb.pixels[i] = scr.pixels[i] }
+            self.introFrame = fb
+            // 100 ticks ≈ 2 s at the renderer's 20 ms/tick scaling —
+            // matches jc_reborn's grUpdateDelay=100 intent.
+            self.state = .playingIntro(ticksRemaining: 100)
+        }
     }
 
     // ---------------------------------------------------------------
@@ -185,7 +212,16 @@ public final class StoryRunner {
     public var sequenceFinished: Bool { state == .done }
 
     /// Composed 640×480 indexed framebuffer for the current frame.
-    public var composedFramebuffer: Framebuffer { scheduler.composedFramebuffer }
+    public var composedFramebuffer: Framebuffer {
+        switch state {
+        case .playingIntro:
+            return introFrame ?? scheduler.composedFramebuffer
+        case .fadeOut:
+            return wipeController?.frame ?? scheduler.composedFramebuffer
+        default:
+            return scheduler.composedFramebuffer
+        }
+    }
 
     /// Number of actively-running TTM threads (for the debug overlay).
     public var activeThreadCount: Int { scheduler.activeThreadCount }
@@ -207,6 +243,7 @@ public final class StoryRunner {
     /// Begin a new story sequence using the current date from `dateProvider`.
     /// Call once, then call `tick()` until `sequenceFinished`.
     public func beginNextSequence(rng: inout some RandomNumberGenerator) throws {
+        wipeController = nil
         // Advance story day if calendar day changed (story.c:65–91)
         let now          = dateProvider.currentDate
         let calDay       = SceneScheduler.dayOfYear(from: now)
@@ -243,6 +280,24 @@ public final class StoryRunner {
     @discardableResult
     public func tick(rng: inout some RandomNumberGenerator) throws -> Int {
         switch state {
+
+        case .playingIntro(let remaining):
+            // Show INTRO.SCR for `remaining` ticks, then wipe to black.
+            // Translates adsPlayIntro() in ads.c:855–861:
+            //   grLoadScreen("INTRO.SCR"); grUpdateDelay=100; grUpdateDisplay(); grFadeOut()
+            if remaining <= 0 {
+                let snapshot = introFrame ?? Framebuffer(filledWith: 0xFF)
+                // Intro always uses type 0 (circle iris) — matches jc_reborn
+                // where fadeOutType==0 on the first grFadeOut() call. Type is
+                // passed explicitly so the per-instance nextWipeType counter
+                // is unaffected regardless of process or view lifetime.
+                wipeController = WipeController(snapshot: snapshot, type: 0)
+                wipeController!.advanceFrame()   // apply step 0 immediately
+                state = .fadeOut
+            } else {
+                state = .playingIntro(ticksRemaining: remaining - 1)
+            }
+            return 1
 
         case .idle:
             // Transition: set up next planned scene (or walk to it first)
@@ -363,12 +418,20 @@ public final class StoryRunner {
 
         case .playingScene(let n, let t):
             if scheduler.isFinished {
-                // Scene done — mark idle to pick next
                 print("[story] scene done: \(n) tag=\(t), advancing to \(scenePlanIndex + 2)/\(scenePlan.count)")
                 scenePlanIndex += 1
                 prevSpot = scenePlan[scenePlanIndex - 1].spotEnd
                 prevHdg  = scenePlan[scenePlanIndex - 1].hdgEnd
-                state = .idle
+                if scenePlanIndex >= scenePlan.count {
+                    // Final scene done — start wipe transition (grFadeOut in story.c:264)
+                    let snapshot = scheduler.composedFramebuffer
+                    wipeController = WipeController(snapshot: snapshot, type: nextWipeType)
+                    nextWipeType = (nextWipeType + 1) % WipeController.typeCount
+                    wipeController!.advanceFrame()   // apply step 0 immediately
+                    state = .fadeOut
+                } else {
+                    state = .idle
+                }
                 return 0
             }
             playingTicks += 1
@@ -401,8 +464,16 @@ public final class StoryRunner {
             }
             return scheduler.tick()
 
-        case .fadeOut, .done:
-            state = .done
+        case .fadeOut:
+            // Advance one wipe step per tick (grFadeOut loop body in graphics.c:619–663).
+            // advanceFrame() returns false after the last step — transition to .done.
+            let stillRunning = wipeController?.advanceFrame() ?? false
+            if !stillRunning {
+                state = .done
+            }
+            return 1
+
+        case .done:
             return 0
         }
     }
@@ -647,7 +718,8 @@ extension StoryState: Equatable {
         case (.idle, .idle),
              (.setupIsland, .setupIsland),
              (.fadeOut, .fadeOut),
-             (.done, .done):
+             (.done, .done),
+             (.playingIntro, .playingIntro):
             return true
         case let (.playingScene(n1, t1), .playingScene(n2, t2)):
             return n1 == n2 && t1 == t2
