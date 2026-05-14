@@ -128,13 +128,13 @@ public final class IslandRenderer {
             switch cloudNo {
             case 0:
                 cx = Int.random(in: 0..<(640 - 129), using: &rng)
-                cy = Int.random(in: 36..<135,        using: &rng)
+                cy = Int.random(in: 0..<(135 - 36),  using: &rng)  // rand() % 99  → [0, 98]
             case 1:
                 cx = Int.random(in: 0..<(640 - 192), using: &rng)
-                cy = Int.random(in: 57..<135,        using: &rng)
+                cy = Int.random(in: 0..<(135 - 57),  using: &rng)  // rand() % 78  → [0, 77]
             default:  // 2
                 cx = Int.random(in: 0..<(640 - 264), using: &rng)
-                cy = Int.random(in: 76..<135,        using: &rng)
+                cy = Int.random(in: 0..<(135 - 76),  using: &rng)  // rand() % 59  → [0, 58]
             }
             guard var bg = graphics.background else { break }
             if windFromLeft {
