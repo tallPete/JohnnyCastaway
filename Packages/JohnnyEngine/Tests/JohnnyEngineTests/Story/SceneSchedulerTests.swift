@@ -54,6 +54,40 @@ struct SceneCatalogueTests {
         #expect(storyScenes.contains { $0.flags.contains(.noRaft) })
         #expect(storyScenes.contains { $0.flags.contains(.holidayNOK) })
     }
+
+    // Regression test for the "Johnny pops to the left-hand side of the
+    // island" bug. The root cause was treating spotStart==0 (Spot.A) as
+    // "undefined / no walk needed" instead of a valid anchor point. The fix
+    // in StoryRunner.transitionToNextScene removes the `scene.spotStart != 0`
+    // guard, relying solely on `prevSpot != scene.spotStart` to skip
+    // same-spot walks. This test documents the invariant:
+    //   • Non-FIRST island scenes CAN start at Spot.A (spotStart == 0).
+    //   • If the StoryRunner were to silently skip the walk for those scenes,
+    //     Johnny would teleport without animating — the original reported bug.
+    @Test("Non-FIRST island scenes that start at Spot.A exist (spotStart == 0 is valid)")
+    func spotAIsValidStartForNonFirstIslandScenes() {
+        let affectedScenes = storyScenes.filter {
+            $0.flags.contains(.island)
+            && !$0.flags.contains(.first)
+            && $0.spotStart == Spot.A   // 0 == Spot.A, NOT "undefined"
+        }
+        // If this assert fires, the catalogue was changed in a way that would
+        // mask the bug again (or the Spot.A constant changed).
+        #expect(!affectedScenes.isEmpty,
+                "Expected at least one non-FIRST island scene starting at Spot.A; found none.")
+
+        // Spot.A itself must be 0 (the value that was mistakenly treated as
+        // "undefined" in the original bug).
+        #expect(Spot.A == 0)
+
+        // Document the specific scenes — STAND.ADS:1,2,3,15, VISITOR.ADS:1,
+        // WALKSTUF.ADS:1 are all Spot.A starters. Verify a known subset.
+        let names = Set(affectedScenes.map { "\($0.adsName):\($0.adsTag)" })
+        #expect(names.contains("STAND.ADS:1"), "STAND.ADS:1 should start at Spot.A")
+        #expect(names.contains("STAND.ADS:2"), "STAND.ADS:2 should start at Spot.A")
+        #expect(names.contains("STAND.ADS:3"), "STAND.ADS:3 should start at Spot.A")
+        #expect(names.contains("STAND.ADS:15"), "STAND.ADS:15 should start at Spot.A")
+    }
 }
 
 // ---------------------------------------------------------------

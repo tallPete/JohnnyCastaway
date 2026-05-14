@@ -492,9 +492,14 @@ public final class StoryRunner {
             try setupIsland(state: islandState, rng: &rng)
         }
 
-        // Walk to scene's start spot if we know where we are
-        if prevSpot != -1 && scene.spotStart != 0 &&
-           prevSpot != scene.spotStart {
+        // Walk to scene's start spot if we know where we are.
+        // Note: spotStart == 0 means Spot.A (the leftmost anchor), NOT
+        // "undefined". The only "no walk" sentinel is prevSpot == -1 (first
+        // scene of the day). The redundant `scene.spotStart != 0` guard that
+        // was here caused Johnny to teleport to Spot.A instead of walking
+        // whenever a STAND.ADS/VISITOR.ADS scene starting at Spot.A was
+        // scheduled after any other spot. (Matches jc_reborn story.c:239.)
+        if prevSpot != -1 && prevSpot != scene.spotStart {
             print(String(format: "[story] walk %d → %d (hdg %d → %d)",
                          prevSpot, scene.spotStart, prevHdg, scene.hdgStart))
             try startWalk(from: prevSpot, fromHdg: prevHdg,
