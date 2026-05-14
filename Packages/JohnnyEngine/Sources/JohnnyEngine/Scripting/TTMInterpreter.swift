@@ -282,8 +282,15 @@ enum TTMInterpreter {
             case 0xA601:   // CLEAR_SCREEN
                 graphics.clearScreen(layer: &thread.layer)
 
-            case 0xB606:   // DRAW_SCREEN — unknown; no-op as in jc_reborn
-                break
+            case 0xB606:   // DRAW_SCREEN — blit the LOAD_SCREEN'd SCR at (x,y)
+                // Semantics from JCOS TTMPlayer.cs:408-419: draw the SCR
+                // stored by the most recent LOAD_SCREEN onto the layer at
+                // args[0], args[1]. Args 2-5 (w, h, ?, ?) are unused.
+                graphics.drawScreen(
+                    on: &thread.layer,
+                    x:  Int(Int16(bitPattern: args[0])),
+                    y:  Int(Int16(bitPattern: args[1]))
+                )
 
             case 0xC051:   // PLAY_SAMPLE
                 sound.playSample(Int(args[0]))

@@ -406,6 +406,34 @@ public final class GraphicsState: @unchecked Sendable {
         isIslandBackground = false
     }
 
+    /// Blit the stored background (from the most recent LOAD_SCREEN) onto a
+    /// layer at TTM-space position (x, y). Translates JCOS's DRAW_SCREEN
+    /// handler in TTMPlayer.cs:408-419, which does:
+    ///   g.DrawImageUnscaled(screenSlot, mc.data[0], mc.data[1])
+    /// The dx/dy island offset is applied exactly as for every other draw
+    /// primitive. Non-0xFF pixels are copied; 0xFF (sentinel transparent)
+    /// pixels are skipped so the layer shows through.
+    func drawScreen(on layer: inout Framebuffer, x inX: Int, y inY: Int) {
+        guard let bg = background else { return }
+        let ox   = inX + dx
+        let oy   = inY + dy
+        let clip = layer.clipRect
+        for row in 0 ..< Framebuffer.height {
+            let destRow = oy + row
+            guard destRow >= clip.y1 && destRow < clip.y2 else { continue }
+            let srcBase = row * Framebuffer.width
+            let dstBase = destRow * Framebuffer.width
+            for col in 0 ..< Framebuffer.width {
+                let destCol = ox + col
+                guard destCol >= clip.x1 && destCol < clip.x2 else { continue }
+                let px = bg.pixels[srcBase + col]
+                if px != 0xFF {
+                    layer.pixels[dstBase + destCol] = px
+                }
+            }
+        }
+    }
+
     /// Set an empty background (transparent sentinel; renders as black).
     /// Translates grInitEmptyBackground() in graphics.c:542–554.
     func initEmptyBackground() {
