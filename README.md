@@ -23,14 +23,12 @@ showing it's a genuine `.saver` bundle.*
 
 ## Status
 
-**v1.1** — feature-complete and stable. Tested on macOS 26 Tahoe,
-Apple Silicon. Runs unattended for hours. As of this release the
-multi-day story arc has been observed through the early days
-(raft size 1, day-driven scene selection, holiday triggers via the
-force-holiday override); end-to-end verification of all eleven
-days, the leftIsland visitor scenes, and the cycle wrap to day 1
-is in progress and will catch up to the code as wall-clock days
-elapse.
+**v1.2** — feature-complete and stable. Tested on macOS 26 Tahoe,
+Apple Silicon. Runs unattended for hours. The multi-day story arc
+has been observed advancing naturally across real calendar days
+(raft growth, visitor scenes, holiday triggers); end-to-end
+verification of all eleven days and the cycle wrap to day 1 is
+ongoing as wall-clock days elapse.
 
 Highlights:
 
@@ -40,9 +38,27 @@ Highlights:
   night/day cycle
 - Walk-graph A* pathfinder
 - 11-day story arc persisted across screensaver activations (v1.1)
+- INTRO.SCR title screen with cycling wipe transitions on startup (v1.2)
 - Configure sheet with animation speed, force-day, force-holiday,
   fidelity-mode, and debug overlay
-- 103 engine unit tests, 11 renderer tests
+- 104 engine unit tests, 11 renderer tests
+
+v1.2 fixes:
+
+- **CPU spin** — `onBackgroundTick` wave-animation closure caused a
+  Swift exclusivity spin after several hours, pegging one CPU core at
+  99%. Fixed.
+- **Sprite clipping** — SET_CLIP_ZONE was stored but not enforced in
+  sprite and rect drawing, allowing sprites to appear above the palm
+  canopy and above the island surface. Fixed.
+- **Walk to Spot.A** — walk to the leftmost anchor was incorrectly
+  skipped when the next scene started at that position. Fixed.
+- **Scene-start flicker** — one stale frame flashed when a new scene
+  began. Fixed.
+- **Cloud placement** — cloud Y formula misread `rand() % (135-N)` as
+  a lower bound rather than a range size, placing clouds too high. Fixed.
+- **Intro hang** — black screen after the intro wipe when a resource
+  failed to load. Fixed.
 
 Known limitations are listed at the bottom of this README.
 
@@ -90,7 +106,7 @@ process so the new build is picked up. You can also build the
 engine and tests via SwiftPM:
 
 ```sh
-cd Packages/JohnnyEngine && swift test          # 103 engine tests
+cd Packages/JohnnyEngine && swift test          # 104 engine tests
 cd Packages/JohnnyMetalRenderer && swift test   # 11 renderer tests
 ```
 
