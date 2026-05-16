@@ -126,6 +126,11 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// Cached so we can unsubscribe in deinit (best-effort).
     private var didStopObserver: NSObjectProtocol? = nil
 
+    /// Subscription to the configure-sheet settings bridge notification.
+    /// Lets the running screensaver pick up changes made in System Settings
+    /// without needing a full restart.
+    private var settingsObserver: NSObjectProtocol? = nil
+
     // (Polling-based zombie detection was removed — see animateOneFrame.)
 
     /// Our parent PID captured at init.  When the screensaver's host
@@ -218,6 +223,20 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         super.startAnimation()
         startupIfNeeded()
 
+        // Re-apply the debug overlay setting on every startAnimation call.
+        // startupIfNeeded() handles this for fresh starts (renderer was nil),
+        // but returns early when the engine is already running.  This covers
+        // the case where the user toggles the overlay in System Settings while
+        // the screensaver is active and then the screensaver restarts or a
+        // preview cycle fires another startAnimation.
+        if case .loaded = loadState {
+            if ResourceFolder.debugOverlayEnabled {
+                installDebugOverlay()
+            } else {
+                removeDebugOverlay()
+            }
+        }
+
         // First-run / error-recovery onboarding: if the engine didn't
         // start (no folder configured, or archive failed to load), show
         // the resource-picker panel.
@@ -296,6 +315,14 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             return
         }
 
+        // Re-sync preferences from disk before reading any settings.
+        // When the legacyScreenSaver preview process is killed and restarted
+        // (which macOS does when the Options sheet is dismissed), cfprefsd may
+        // serve stale cached values to the new process even though the ByHost
+        // plist file was updated by the previous instance via writeToOwnByHostPlist.
+        // CFPreferencesSynchronize forces a re-read from the plist file.
+        ResourceFolder.flushPreferences()
+
         NSLog("[Johnny] startupIfNeeded: starting — process=%@",
               ProcessInfo.processInfo.processName)
 
@@ -327,12 +354,17 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
         // 3. Sound sink — create before the StoryRunner so the sink's
         //    AVAudioPlayers are preloaded from the same folder.
-        if ResourceFolder.soundEnabled {
+        //    On multi-monitor setups macOS starts one legacyScreenSaver per
+        //    display.  Restrict audio to the main display only; all others use
+        //    a silent sink so we don't get a cacophony of simultaneous audio.
+        let isMainDisplay = window?.screen == NSScreen.main || NSScreen.main == nil
+        if ResourceFolder.soundEnabled && isMainDisplay {
             soundSink = AVAudioPlayerSoundSink(folder: folder)
             NSLog("[Johnny] startupIfNeeded: sound ON")
         } else {
             soundSink = NullSoundSink()
-            NSLog("[Johnny] startupIfNeeded: sound OFF")
+            NSLog("[Johnny] startupIfNeeded: sound OFF%@",
+                  ResourceFolder.soundEnabled ? " (secondary display — muted)" : "")
         }
 
         // 4. Parse archive + spin up StoryRunner
@@ -699,6 +731,10 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     /// screensaver session ends.  Reliable on Tahoe even when the
     /// ScreenSaverView callbacks (stopAnimation / viewDidMoveToWindow)
     /// don't fire.  Idempotent — only attaches once per instance.
+    ///
+    /// Also subscribes to the configure-sheet settings bridge notification
+    /// so that changes made in System Settings are applied live to a running
+    /// screensaver instance without needing a restart.
     private func installDismissalObservers() {
         guard didStopObserver == nil else { return }
         didStopObserver = DistributedNotificationCenter.default().addObserver(
@@ -707,9 +743,41 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             queue:     .main
         ) { [weak self] _ in
             guard let self else { return }
-            NSLog("[Johnny] received com.apple.screensaver.didstop")
+            // com.apple.screensaver.didstop is a system-wide distributed
+            // notification.  When a hot-corner screensaver starts, macOS
+            // posts it to tell the WallpaperAgent's background screensaver
+            // to stop — but our full-screen instance receives it too.
+            // If we're currently animating the notification is not ours;
+            // acting on it would tear down the running screensaver, arm
+            // the watchdog, and force an unexpected exit(0) 8 seconds in.
+            guard !self.isAnimating else {
+                NSLog("[Johnny] didstop received but ignored — currently animating (not our stop)")
+                return
+            }
+            NSLog("[Johnny] didstop received — tearing down")
             self.teardown()
             self.scheduleEmergencyExitIfNeeded()
+        }
+
+        guard settingsObserver == nil else { return }
+        settingsObserver = DistributedNotificationCenter.default().addObserver(
+            forName: ResourceFolder.settingsChangedNotification,
+            object:  nil,
+            queue:   .main
+        ) { [weak self] notification in
+            // Persist the incoming value into our own ScreenSaverDefaults so
+            // future launches of legacyScreenSaver see the updated setting.
+            ResourceFolder.applyNotification(notification)
+            // Decode the key from the object-field payload "key|type:value".
+            // macOS strips userInfo from distributed notifications sent by
+            // sandboxed processes; the object field (a String) is preserved.
+            guard let payload = notification.object as? String,
+                  let keyPart = payload.split(separator: "|", maxSplits: 1).first
+            else { return }
+            let key = String(keyPart)
+            DispatchQueue.main.async { [weak self] in
+                self?.applyLiveSettingChange(key: key)
+            }
         }
     }
 
@@ -752,6 +820,42 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // observer captures `self` weakly so a stale self is harmless.  The
     // host process eventually dying (either naturally or via our exit
     // watchdog) reclaims everything.
+
+    // ---------------------------------------------------------------
+    // MARK: Live settings application
+    // ---------------------------------------------------------------
+    //
+    // When the configure-sheet settings bridge delivers a change via
+    // distributed notification, applyLiveSettingChange() applies it to
+    // the running engine/view immediately so no screensaver restart is
+    // needed.  Settings that require a full engine restart (e.g. sound,
+    // holiday/date-provider) are silently skipped — they take effect on
+    // the next activation.
+
+    /// Apply a setting change to the running engine/view without a restart.
+    /// `key` is the raw ScreenSaverDefaults key string from ResourceFolder;
+    /// the current value is read from ResourceFolder (already updated by
+    /// `applyNotification` before this is called).
+    private func applyLiveSettingChange(key: String) {
+        NSLog("[Johnny] applyLiveSettingChange: key=%@", key)
+        // Keys are the raw ScreenSaverDefaults key strings from ResourceFolder.
+        if key == "ShowDebugOverlay" {
+            if ResourceFolder.debugOverlayEnabled {
+                installDebugOverlay()
+            } else {
+                removeDebugOverlay()
+            }
+        } else if key == "AnimationSpeed" {
+            animationSpeed = ResourceFolder.animationSpeed
+            NSLog("[Johnny] applyLiveSettingChange: animationSpeed=%.2f", animationSpeed)
+        } else if key == "FidelityMode" {
+            storyRunner?.fidelityMode = ResourceFolder.fidelityMode
+        } else if key == "ForceStoryDay" {
+            let day = ResourceFolder.forceStoryDay
+            storyRunner?.forceStoryDay = day > 0 ? day : nil
+        }
+        // SoundEnabled, ForceHoliday: require engine restart; no live apply.
+    }
 
     // ---------------------------------------------------------------
     // MARK: Debug overlay (HUD)
@@ -847,7 +951,12 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
     @objc public override var configureSheet: NSWindow? {
         NSLog("[Johnny] configureSheet getter called")
-        let win = ConfigureSheetController.shared.window
+        let sheet = ConfigureSheetController.shared
+        // Access window first — this triggers the lazy makeWindow() which
+        // sets up all the controls.  Only then call refresh() to flush
+        // cfprefsd and re-read all control states from persisted defaults.
+        let win = sheet.window
+        sheet.refresh()
         NSLog("[Johnny] configureSheet returning window=%@ visible=%d",
               String(describing: win), win.isVisible ? 1 : 0)
         return win

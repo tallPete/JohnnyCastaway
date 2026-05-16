@@ -245,6 +245,15 @@ final class ConfigureSheetController: NSObject {
         return candidates.min(by: { abs($0 - target) < abs($1 - target) }) ?? 100
     }
 
+    /// Sync preferences from disk then refresh all controls to match.
+    /// Call this before each presentation so the sheet reflects the latest
+    /// persisted state even when the configure-sheet process has been alive
+    /// for a while and cfprefsd's in-process cache may be stale.
+    func refresh() {
+        ResourceFolder.flushPreferences()
+        refreshLabels()
+    }
+
     private func refreshLabels() {
         if let path = ResourceFolder.displayPath {
             pathLabel.stringValue = "Configured: \(path)"
@@ -254,8 +263,12 @@ final class ConfigureSheetController: NSObject {
             pathLabel.textColor   = .systemOrange
         }
         statusLabel.stringValue = ""
-        soundCheckbox.state = ResourceFolder.soundEnabled ? .on : .off
-        debugCheckbox.state = ResourceFolder.debugOverlayEnabled ? .on : .off
+        soundCheckbox.state  = ResourceFolder.soundEnabled      ? .on : .off
+        speedPopup.selectItem(withTag: speedTag(for: ResourceFolder.animationSpeed))
+        dayPopup.selectItem(withTag: ResourceFolder.forceStoryDay)
+        holidayPopup.selectItem(withTag: ResourceFolder.forceHoliday)
+        fidelityPopup.selectItem(withTag: ResourceFolder.fidelityMode == .fixed ? 0 : 1)
+        debugCheckbox.state  = ResourceFolder.debugOverlayEnabled ? .on : .off
     }
 
     // ---------------------------------------------------------------

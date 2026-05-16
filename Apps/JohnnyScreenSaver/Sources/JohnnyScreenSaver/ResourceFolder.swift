@@ -1,10 +1,12 @@
 // ResourceFolder.swift
 //
-// Persists the user's chosen Sierra resource folder path in
-// ScreenSaverDefaults.  Both the System Settings preview pane (running
-// in the System Settings process) and the full-screen legacyScreenSaver
-// process use the same ScreenSaverDefaults plist file keyed by bundle ID,
-// so a path saved in one is visible in the other.
+// Persists the user's chosen Sierra resource folder path and other
+// settings in ScreenSaverDefaults.  On macOS Sonoma/Tahoe each process
+// runs in its own sandbox container, so ScreenSaverDefaults writes from
+// System Settings land in a different plist than legacyScreenSaver reads.
+// Settings changes are bridged via distributed notifications — picked up
+// immediately when legacyScreenSaver is already running, and read from
+// legacyScreenSaver's own ScreenSaverDefaults on the next activation otherwise.
 //
 // Access model:
 //   • The PLAIN PATH (pathKey) is stored in ScreenSaverDefaults for
@@ -50,6 +52,131 @@ enum ResourceFolder {
     private static let forceHolidayKey    = "ForceHoliday"     // Int; 0=Off,1=Halloween,2=StPatrick,3=Christmas,4=NewYear
     private static let fidelityModeKey    = "FidelityMode"     // String; "fixed" | "raw"
     private static let debugOverlayKey    = "ShowDebugOverlay" // Bool
+
+    // ---------------------------------------------------------------
+    // MARK: Cross-process settings bridge
+    // ---------------------------------------------------------------
+    //
+    // On macOS Tahoe the screensaver pipeline involves three separate processes:
+    //
+    //   System Settings → Wallpaper-Settings.extension  (hosts our configure sheet)
+    //                    → legacyScreenSaver[preview]   (small Wallpaper panel preview)
+    //   WallpaperAgent  → legacyScreenSaver[wallpaper]  (always-on wallpaper preview)
+    //
+    // ScreenSaverDefaults are sandbox-scoped, so the configure sheet's writes
+    // never reach either legacyScreenSaver instance.  We bridge with a
+    // distributed notification, but macOS silently strips userInfo from
+    // notifications sent by sandboxed processes.  Instead we encode
+    // "key|type:value" in the notification's object field (a plain NSString),
+    // which IS preserved across sandbox boundaries.
+    //
+    // When a legacyScreenSaver instance receives the notification it:
+    //   1. Writes the value to its own sharedDefaults (in-memory + CFPreferences flush)
+    //   2. Also writes directly to its ByHost plist file so the value survives
+    //      the process being killed and restarted when Options is dismissed.
+
+    /// Distributed-notification name posted when any configure-sheet setting changes.
+    static let settingsChangedNotification = Notification.Name("nz.petesmith.JohnnyScreenSaver.settingsChanged")
+
+    /// Post a distributed notification so all running legacyScreenSaver instances
+    /// pick up the new value immediately.  Key+value are encoded as
+    /// "key|type:value" in the notification's object field because macOS strips
+    /// userInfo from distributed notifications sent by sandboxed processes.
+    private static func bridgeToPeerProcesses(key: String, value: Any) {
+        // Encode value with a type tag so the receiver can reconstruct it.
+        let valueStr: String
+        switch value {
+        case let b as Bool:   valueStr = "bool:\(b)"
+        case let d as Double: valueStr = "double:\(d)"
+        case let i as Int:    valueStr = "int:\(i)"
+        case let s as String: valueStr = "str:\(s)"
+        default:              valueStr = "str:\(value)"
+        }
+        let payload = "\(key)|\(valueStr)"
+        DistributedNotificationCenter.default().postNotificationName(
+            settingsChangedNotification,
+            object: payload,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+        NSLog("[Johnny] ResourceFolder: posted notification payload=%@", payload)
+    }
+
+    /// Decode the payload from a received distributed notification and persist
+    /// the new value into the local ScreenSaverDefaults.  Called from
+    /// JohnnyScreenSaverView when running inside legacyScreenSaver.
+    ///
+    /// Also writes directly to the ByHost plist so the value survives
+    /// legacyScreenSaver being killed and restarted when Options is closed.
+    static func applyNotification(_ notification: Notification) {
+        guard let payload = notification.object as? String else {
+            NSLog("[Johnny] ResourceFolder: applyNotification — no object payload (userInfo stripped by sandbox)")
+            return
+        }
+        let parts = payload.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            NSLog("[Johnny] ResourceFolder: applyNotification — malformed payload: %@", payload)
+            return
+        }
+        let key      = parts[0]
+        let valueStr = parts[1]
+        let value: Any
+        if      valueStr == "bool:true"                                              { value = true  }
+        else if valueStr == "bool:false"                                             { value = false }
+        else if valueStr.hasPrefix("double:"), let d = Double(valueStr.dropFirst(7)) { value = d     }
+        else if valueStr.hasPrefix("int:"),    let i = Int(valueStr.dropFirst(4))    { value = i     }
+        else if valueStr.hasPrefix("str:")                                           { value = String(valueStr.dropFirst(4)) }
+        else                                                                         { value = valueStr }
+
+        sharedDefaults.set(value, forKey: key)
+        flushPreferences()
+        // Belt-and-suspenders: also write directly to the ByHost plist file.
+        // flushPreferences() may not complete before macOS kills the preview
+        // process on Options-sheet close; a direct atomic file write survives.
+        writeToOwnByHostPlist(key: key, value: value)
+        NSLog("[Johnny] ResourceFolder: applied key=%@ value=%@", key, "\(value)")
+    }
+
+    /// Force a bidirectional sync with cfprefsd: flushes pending in-process writes
+    /// to disk and re-reads any values that were changed externally (e.g. by a
+    /// previous legacyScreenSaver instance that wrote via writeToOwnByHostPlist).
+    /// Call this at the start of startupIfNeeded() so that settings read during
+    /// startup reflect values written by the previous process before it was killed.
+    static func flushPreferences() {
+        let id = Bundle(for: JohnnyScreenSaverView.self).bundleIdentifier
+                     ?? "nz.petesmith.JohnnyScreenSaver"
+        CFPreferencesSynchronize(id as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+    }
+
+    /// Write key=value atomically to our own ByHost plist.
+    /// Effective only when called from within legacyScreenSaver (our own container).
+    private static func writeToOwnByHostPlist(key: String, value: Any) {
+        let byHostDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Containers/com.apple.ScreenSaver.Engine.legacyScreenSaver" +
+                "/Data/Library/Preferences/ByHost"
+            )
+        let bundleID = "nz.petesmith.JohnnyScreenSaver"
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: byHostDir, includingPropertiesForKeys: nil
+        ), let plistURL = files.first(where: {
+            $0.lastPathComponent.hasPrefix(bundleID) && $0.pathExtension == "plist"
+        }) else {
+            NSLog("[Johnny] ResourceFolder: writeToOwnByHostPlist — plist not found")
+            return
+        }
+        do {
+            var dict: [String: Any] = (try? Data(contentsOf: plistURL)).flatMap {
+                try? PropertyListSerialization.propertyList(from: $0, options: [], format: nil) as? [String: Any]
+            } ?? [:]
+            dict[key] = value
+            let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+            try data.write(to: plistURL, options: .atomic)
+            NSLog("[Johnny] ResourceFolder: writeToOwnByHostPlist — wrote %@=%@", key, "\(value)")
+        } catch {
+            NSLog("[Johnny] ResourceFolder: writeToOwnByHostPlist — failed: %@", error.localizedDescription)
+        }
+    }
 
     // Multi-day-arc persistence: written every time the engine advances
     // a sequence (so the user's progress through Sierra's 11-day story
@@ -130,7 +257,7 @@ enum ResourceFolder {
                             relativeTo: nil
                         ) {
                             sharedDefaults.set(newData, forKey: bookmarkKey)
-                            sharedDefaults.synchronize()
+                            flushPreferences()
                             NSLog("[Johnny] ResourceFolder.resolve: refreshed stale bookmark")
                         }
                     }
@@ -235,8 +362,8 @@ enum ResourceFolder {
             NSLog("[Johnny] ResourceFolder.save: non-legacyScreenSaver context — bookmark unchanged")
         }
 
-        let ok = sharedDefaults.synchronize()
-        NSLog("[Johnny] ResourceFolder.save: saved path=%@ synchronize()=%d", url.path, ok ? 1 : 0)
+        flushPreferences()
+        NSLog("[Johnny] ResourceFolder.save: saved path=%@", url.path)
     }
 
     /// Whether the user has sound enabled.
@@ -259,7 +386,8 @@ enum ResourceFolder {
         }
         set {
             sharedDefaults.set(newValue, forKey: soundEnabledKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: soundEnabledKey, value: newValue)
             NSLog("[Johnny] ResourceFolder.soundEnabled = %d", newValue ? 1 : 0)
         }
     }
@@ -269,7 +397,7 @@ enum ResourceFolder {
         stopAccessing()
         sharedDefaults.removeObject(forKey: pathKey)
         sharedDefaults.removeObject(forKey: bookmarkKey)
-        sharedDefaults.synchronize()
+        flushPreferences()
         NSLog("[Johnny] ResourceFolder.clear: done")
     }
 
@@ -287,7 +415,8 @@ enum ResourceFolder {
         }
         set {
             sharedDefaults.set(newValue, forKey: animationSpeedKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: animationSpeedKey, value: newValue)
         }
     }
 
@@ -296,7 +425,8 @@ enum ResourceFolder {
         get { sharedDefaults.integer(forKey: storyDayKey) }
         set {
             sharedDefaults.set(newValue, forKey: storyDayKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: storyDayKey, value: newValue)
         }
     }
 
@@ -306,7 +436,8 @@ enum ResourceFolder {
         get { sharedDefaults.integer(forKey: forceHolidayKey) }
         set {
             sharedDefaults.set(newValue, forKey: forceHolidayKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: forceHolidayKey, value: newValue)
         }
     }
 
@@ -319,7 +450,8 @@ enum ResourceFolder {
         }
         set {
             sharedDefaults.set(newValue.rawValue, forKey: fidelityModeKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: fidelityModeKey, value: newValue.rawValue)
         }
     }
 
@@ -328,7 +460,8 @@ enum ResourceFolder {
         get { sharedDefaults.bool(forKey: debugOverlayKey) }
         set {
             sharedDefaults.set(newValue, forKey: debugOverlayKey)
-            sharedDefaults.synchronize()
+            flushPreferences()
+            bridgeToPeerProcesses(key: debugOverlayKey, value: newValue)
         }
     }
 
@@ -391,7 +524,7 @@ enum ResourceFolder {
     static func saveStoryProgress(day: Int, lastCalendarDay: Int) {
         sharedDefaults.set(day,             forKey: progressDayKey)
         sharedDefaults.set(lastCalendarDay, forKey: progressCalDayKey)
-        sharedDefaults.synchronize()
+        flushPreferences()
     }
 
     /// Reset the persisted story arc.  Not currently surfaced in the
@@ -399,7 +532,7 @@ enum ResourceFolder {
     static func clearStoryProgress() {
         sharedDefaults.removeObject(forKey: progressDayKey)
         sharedDefaults.removeObject(forKey: progressCalDayKey)
-        sharedDefaults.synchronize()
+        flushPreferences()
         NSLog("[Johnny] ResourceFolder.clearStoryProgress: done")
     }
 
