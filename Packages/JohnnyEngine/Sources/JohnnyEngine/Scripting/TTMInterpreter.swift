@@ -315,7 +315,17 @@ enum TTMInterpreter {
                 if let bmp = try? cache.bitmap(named: strArg),
                    let slot2 = thread.ttmSlot {
                     let slotIdx = thread.selectedBmpSlot
-                    slot2.bitmaps[slotIdx] = bmp
+                    // Defensive bounds-guard: selectedBmpSlot comes straight from
+                    // SET_BMP_SLOT's bytecode arg with no validation, and `bitmaps`
+                    // is fixed-size MAX_BMP_SLOTS. Canonical data keeps this in
+                    // range (jc_reborn assumes the same), but guard so malformed
+                    // data can't index out of range — the same failure class as
+                    // the MAX_TTM_SLOTS slot index.
+                    if slotIdx >= 0 && slotIdx < MAX_BMP_SLOTS {
+                        slot2.bitmaps[slotIdx] = bmp
+                    } else {
+                        print("[ttm] WARN LOAD_IMAGE: selectedBmpSlot \(slotIdx) out of range (0..<\(MAX_BMP_SLOTS)) — ignoring")
+                    }
                 }
 
             case 0xF05F:   // LOAD_PALETTE — no-op as in jc_reborn

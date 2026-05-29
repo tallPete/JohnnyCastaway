@@ -15,7 +15,16 @@ import JohnnyResources
 let MAX_BMP_SLOTS = 6
 
 /// Maximum number of TTM slots active in one ADS run.
-let MAX_TTM_SLOTS = 6
+///
+/// MUST match jc_reborn (`graphics.h`: `#define MAX_TTM_SLOTS 10`) and the
+/// Go port (`MaxTTMSlots`). This was previously 6 — almost certainly copied
+/// from MAX_BMP_SLOTS above — which truncated the slot table: visitor/final
+/// scenes (VISITOR.ADS, MARY.ADS, …) reference TTM slot id 6, so beginADS
+/// silently skipped loading that TTM and adsAddScene then indexed `ttmSlots`
+/// out of range. In a debuggable build that traps; inside the legacyScreenSaver
+/// host it manifested as a runaway main-thread spin in Swift's exclusivity
+/// machinery (the multi-hour "freeze" + black-screen-on-restart).
+let MAX_TTM_SLOTS = 10
 
 /// Maximum number of concurrently running TTM threads.
 let MAX_TTM_THREADS = 10

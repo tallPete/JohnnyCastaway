@@ -294,6 +294,17 @@ final class ADSScheduler {
     // ---------------------------------------------------------------
 
     private func adsAddScene(slot: UInt16, tag: UInt16, arg3: UInt16) {
+        // Defensive bounds-guard on the TTM slot index from the ADS bytecode.
+        // adsLoad()/beginADS() already bound their slot indices to MAX_TTM_SLOTS,
+        // but adsAddScene did not — so an ADD_SCENE referencing slot >=
+        // MAX_TTM_SLOTS indexed `ttmSlots` out of range (line below). With
+        // MAX_TTM_SLOTS now matching jc_reborn (10) this should not trigger for
+        // canonical data, but we keep the guard so malformed/unknown data
+        // degrades gracefully instead of trapping (or spinning in the host).
+        guard Int(slot) < MAX_TTM_SLOTS else {
+            print("[ads] WARN adsAddScene: slot \(slot) >= MAX_TTM_SLOTS(\(MAX_TTM_SLOTS)) tag=\(tag) — ignoring ADD_SCENE")
+            return
+        }
         // Don't add duplicates
         for t in threads where t.isRunning == 1 {
             if t.sceneSlot == slot && t.sceneTag == tag { return }
