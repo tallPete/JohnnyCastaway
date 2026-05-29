@@ -47,6 +47,13 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     private var rng          = SystemRandomNumberGenerator()
     private var soundSink: SoundSink = NullSoundSink()
 
+    /// Background-thread watchdog that detects (and logs) a wedged main
+    /// thread — the "spin / freeze".  Diagnostic only: it never exits the
+    /// process or changes engine behaviour.  See MainThreadStallMonitor.swift
+    /// for why a *background* thread is the only thing that can observe this
+    /// failure (every other recovery path runs on the main thread that wedges).
+    private let stallMonitor = MainThreadStallMonitor()
+
     /// Wall-clock time of the last engine tick. Used to pace ticks
     /// against the engine's `mini` value (×20 ms per tick — see
     /// jc_reborn events.c:108).
@@ -164,6 +171,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         NSLog("[Johnny] init(frame:isPreview:) preview=%d process=%@ parentPID=%d",
               isPreview ? 1 : 0, ProcessInfo.processInfo.processName, originalParentPID)
         installDismissalObservers()
+        stallMonitor.start()
     }
 
     public required init?(coder: NSCoder) {
@@ -173,6 +181,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         originalParentPID = getppid()
         NSLog("[Johnny] init(coder:) parentPID=%d", originalParentPID)
         installDismissalObservers()
+        stallMonitor.start()
     }
 
     // ---------------------------------------------------------------
@@ -223,6 +232,12 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         super.startAnimation()
         startupIfNeeded()
 
+        // Arm the stall monitor only for genuine full-screen activation inside
+        // legacyScreenSaver.  This keeps the System Settings preview pane (and
+        // its normal start/stop churn) from being misread as a wedge, and
+        // resets the heartbeat so the just-started session begins clean.
+        stallMonitor.setActive(Self.isInLegacyScreenSaver && wasFullScreenAtStart)
+
         // Re-apply the debug overlay setting on every startAnimation call.
         // startupIfNeeded() handles this for fresh starts (renderer was nil),
         // but returns early when the engine is already running.  This covers
@@ -269,6 +284,10 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
 
     public override func stopAnimation() {
         super.stopAnimation()
+        // A real stopAnimation runs on the main thread, which proves it's
+        // alive — so stand the stall monitor down to avoid flagging the
+        // (legitimate) heartbeat gap that follows as a wedge.
+        stallMonitor.setActive(false)
         // Silence audio synchronously every time stopAnimation fires.
         //
         // We intentionally do NOT tear down the engine / Metal here —
@@ -351,6 +370,12 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             loadState = .notLoaded
             return
         }
+
+        // Point the stall monitor's file sink at the (sandbox-writable)
+        // resource folder so a wedge that happens hours from now leaves a
+        // persistent record next to the data files, retrievable after the fact.
+        stallMonitor.configure(
+            logFileURL: folder.appendingPathComponent("JohnnyCastaway-stall.log"))
 
         // 3. Sound sink — create before the StoryRunner so the sink's
         //    AVAudioPlayers are preloaded from the same folder.
@@ -606,6 +631,8 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
     // ---------------------------------------------------------------
 
     private func teardown() {
+        // Teardown runs on the main thread (proving it's alive); stop watching.
+        stallMonitor.setActive(false)
         NSLog("[Johnny] teardown — loadState was %@",
               { switch loadState { case .notLoaded: return "notLoaded"
                                    case .loaded:    return "loaded"
@@ -679,6 +706,7 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
             if elapsedMS >= Double(lastMiniMS) {
                 do {
                     if runner.sequenceFinished {
+                        stallMonitor.beat("engine.beginNextSequence day=\(runner.storyDay)")
                         try runner.beginNextSequence(rng: &rng)
                         // Persist story progression — but only when the
                         // user hasn't pinned the day via the configure
@@ -693,6 +721,8 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
                             )
                         }
                     }
+                    let summary = runner.diagnosticSummary
+                    stallMonitor.beat("engine.tick/update \(summary)", snapshot: summary)
                     let mini = try runner.tick(rng: &rng)
                     let scaledMS = Double(mini * 20) / max(0.1, animationSpeed)
                     lastMiniMS   = max(4, Int(scaledMS.rounded()))
@@ -716,7 +746,9 @@ public final class JohnnyScreenSaverView: ScreenSaverView {
         // updated or holds the last good frame — render anyway so the
         // display stays alive.)
 
+        stallMonitor.beat("nextDrawable")
         guard let drawable = metalLayer.nextDrawable() else { return }
+        stallMonitor.beat("render")
         renderer.render(to: drawable, drawableSize: metalLayer.drawableSize)
 
         // Update the debug HUD (cheap; only allocates a string once per frame).

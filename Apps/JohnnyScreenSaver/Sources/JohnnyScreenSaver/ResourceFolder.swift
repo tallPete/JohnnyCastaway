@@ -307,6 +307,12 @@ enum ResourceFolder {
         sharedDefaults.string(forKey: pathKey)
     }
 
+    /// The folder whose security scope is currently active (set by a
+    /// successful `resolve()` in legacyScreenSaver).  Diagnostics can write
+    /// here because the sandbox token granting access is held for the
+    /// lifetime of the running screensaver.  Nil before resolve() succeeds.
+    static var activeFolderURL: URL? { activeSecurityScopedURL }
+
     /// Persist the user-picked folder path.
     ///
     /// Validates that RESOURCE.MAP and RESOURCE.001 are present;

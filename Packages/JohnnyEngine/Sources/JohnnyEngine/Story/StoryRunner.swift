@@ -240,6 +240,26 @@ public final class StoryRunner {
     /// Set of TTM opcodes covered since the last beginADS call (for the debug overlay).
     public var coveredTTMOpcodes: Set<UInt16> { TTMInterpreter.coveredOpcodes }
 
+    /// Compact, allocation-light one-line description of the engine's current
+    /// position, for the stall monitor's diagnostic dump.  Exposes the private
+    /// state machine + scene-plan progress that the debug overlay can't see, so
+    /// that when the main thread wedges we know exactly which scene/state was
+    /// executing.  Side-effect free.
+    public var diagnosticSummary: String {
+        let stateStr: String
+        switch state {
+        case .idle:                       stateStr = "idle"
+        case .setupIsland:                stateStr = "setupIsland"
+        case .walking:                    stateStr = "walking"
+        case .playingIntro(let r):        stateStr = "playingIntro(rem=\(r))"
+        case .fadeOut:                    stateStr = "fadeOut"
+        case .done:                       stateStr = "done"
+        case .playingScene(let n, let t): stateStr = "playingScene(\(n) tag=\(t) ticks=\(playingTicks))"
+        }
+        return "day=\(storyDay) state=\(stateStr) plan=\(scenePlanIndex)/\(scenePlan.count) " +
+               "threads=\(activeThreadCount)/\(allocatedThreadCount)"
+    }
+
     /// Begin a new story sequence using the current date from `dateProvider`.
     /// Call once, then call `tick()` until `sequenceFinished`.
     public func beginNextSequence(rng: inout some RandomNumberGenerator) throws {
