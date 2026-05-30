@@ -23,7 +23,7 @@ showing it's a genuine `.saver` bundle.*
 
 ## Status
 
-**v1.2** — feature-complete and stable. Tested on macOS 26 Tahoe,
+**v1.3** — feature-complete and stable. Tested on macOS 26 Tahoe,
 Apple Silicon. Runs unattended for hours. The multi-day story arc
 has been observed advancing naturally across real calendar days
 (raft growth, visitor scenes, holiday triggers); end-to-end
@@ -42,6 +42,25 @@ Highlights:
 - Configure sheet with animation speed, force-day, force-holiday,
   fidelity-mode, and debug overlay
 - 104 engine unit tests, 11 renderer tests
+
+v1.3 fixes:
+
+- **Multi-hour freeze / black-screen-on-restart** — `MAX_TTM_SLOTS`
+  was 6 (mis-copied from `MAX_BMP_SLOTS`). Visitor and final scenes
+  reference TTM slot 6, so `adsAddScene` silently skipped loading
+  that slot and then indexed out of range. Inside the
+  `legacyScreenSaver` host this manifested as a runaway Swift
+  exclusivity spin on the main thread, only triggered after hours
+  when the 11-day scheduler happened to pick an affected scene. Slot
+  count corrected to 10 (matching jc_reborn and the Go port). Fixed.
+- **Settings not persisting across screensaver restarts** — on macOS
+  Tahoe the configure sheet, preview process, and full-screen process
+  each run in separate sandboxed containers. `ScreenSaverDefaults`
+  writes were invisible across processes. Fixed via distributed
+  notifications plus a direct ByHost plist write as a fallback.
+- **Audio playing on all monitors** — macOS starts one
+  `legacyScreenSaver` instance per display; audio is now gated to
+  the main screen only. Fixed.
 
 v1.2 fixes:
 
