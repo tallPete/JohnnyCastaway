@@ -327,5 +327,25 @@ review cadence is best-effort.
 
 ## Licence
 
-[MIT](LICENSE) for the source code in this repository. The Sierra
-data files are not covered and are not redistributed.
+**[GPLv3-or-later](LICENSE)** for the source code in this repository
+(full text in [COPYING](COPYING)).
+
+This engine is a derivative work of [`jc_reborn`](https://github.com/jno6809/jc_reborn)
+by Jeremie Guillaume, which is GPLv3-or-later: the TTM interpreter, the
+ADS/scene scheduler, and the walk/path-finding code and data tables were
+translated from its C source (see the per-file "Translated from …" headers
+and the Acknowledgements above). Because of that, the combined work must be
+distributed under the GPL — so anyone may use, modify, and even sell it, but
+distributed derivatives must remain open under the GPL with source available.
+
+The Sierra/Dynamix data files are not covered by this licence and are not
+redistributed.
+
+### Licensing history
+
+Releases up to and including **v1.3** were published with an MIT licence.
+That was a mistake: because this engine is a derivative work of the
+GPLv3-or-later `jc_reborn`, MIT was not a licence the author was entitled to
+grant. The project is **GPLv3-or-later from this point forward**, and the MIT
+terms on those earlier builds should be disregarded. If you obtained an
+earlier copy under MIT, please treat it as GPLv3-or-later.
