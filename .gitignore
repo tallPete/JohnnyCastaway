@@ -1,7 +1,10 @@
 # --- Sierra/Dynamix IP — never commit ---------------------------------
 # RESOURCE.MAP, RESOURCE.001, sound*.wav are obtained per-user
-# (bring-your-own model). They live here for local development only.
-Resources/
+# (bring-your-own model). They live in the root Resources/ folder for
+# local development only. The leading / anchors this rule to the repo
+# root so that source-code subdirectories named Resources/ (e.g.
+# Packages/**/Resources/, Apps/**/Resources/) are NOT excluded.
+/Resources/
 
 # --- Reference implementations ----------------------------------------
 # These are public clones of jc_reborn / Johnny-Castaway-2026-Public /

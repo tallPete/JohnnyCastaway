@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle identity -->
+    <key>CFBundleIdentifier</key>
+    <string>nz.petesmith.JohnnyDebugApp</string>
+    <key>CFBundleName</key>
+    <string>JohnnyDebugApp</string>
+    <key>CFBundleDisplayName</key>
+    <string>Johnny Debug</string>
+    <key>CFBundleExecutable</key>
+    <string>JohnnyDebugApp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.5</string>
+
+    <!-- macOS app identity -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+
+    <!-- Display / rendering -->
+    <!--
+        NSHighResolutionCapable = true is REQUIRED for crisp Metal rendering.
+        Without it, the CAMetalLayer drawable is scaled at 1× on Retina
+        displays, producing blurry pixel art instead of sharp integer scaling.
+    -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>
