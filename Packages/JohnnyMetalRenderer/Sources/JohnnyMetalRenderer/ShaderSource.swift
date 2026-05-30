@@ -8,7 +8,7 @@
 // This program is free software: you can redistribute it and/or modify it
 // under the terms of the GNU General Public License as published by the Free
 // Software Foundation, either version 3 of the License, or (at your option)
-// any later version. See the COPYING file or <https://www.gnu.org/licenses/>.
+// any later version. See the LICENSE file or <https://www.gnu.org/licenses/>.
 
 // ShaderSource.swift
 //

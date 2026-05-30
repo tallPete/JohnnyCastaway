@@ -328,7 +328,7 @@ review cadence is best-effort.
 ## Licence
 
 **[GPLv3-or-later](LICENSE)** for the source code in this repository
-(full text in [COPYING](COPYING)).
+(full licence text in [LICENSE](LICENSE)).
 
 This engine is a derivative work of [`jc_reborn`](https://github.com/jno6809/jc_reborn)
 by Jeremie Guillaume, which is GPLv3-or-later: the TTM interpreter, the
